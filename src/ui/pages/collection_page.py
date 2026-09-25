@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.playback_controller import PlaybackController
-from ui.widgets.track_list import TrackList, track_line
+from ui.widgets.track_list import TrackList, apply_row_delegate, entry_item
 
 SECTION_TITLES = {
     "tracks": "Любимые треки",
@@ -75,9 +75,8 @@ class CollectionPage(QWidget):
                 page: QWidget = TrackList()
                 page.track_activated.connect(self._play)  # type: ignore[attr-defined]
             else:
-                page = QListWidget()
+                page = apply_row_delegate(QListWidget())
                 page.setObjectName("TrackList")
-                page.setAlternatingRowColors(True)
             self._pages[section] = page
             self.tabs.addTab(page, section)
         root.addWidget(self.tabs, 1)
@@ -133,9 +132,8 @@ class CollectionPage(QWidget):
             return
         entries = list(items or [])
         page.clear()
-        for entry in entries:
-            item = QListWidgetItem(track_line(entry))
-            page.addItem(item)
+        for index, entry in enumerate(entries):
+            page.addItem(entry_item(entry, index))
         if not entries:
             page.addItem(QListWidgetItem("Пока пусто"))
         self.status_label.setText(f"{SECTION_TITLES[section]}: {len(entries)}")

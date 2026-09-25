@@ -8,7 +8,9 @@ testable without Qt windows.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+import logging
+
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -29,7 +31,19 @@ from ui.pages.collection_page import CollectionPage
 from ui.pages.search_page import SearchPage
 from ui.pages.settings_page import SettingsPage
 from ui.pages.wave_page import WavePage
+from ui.theme import (
+    ACCENT,
+    COVER_SIZE,
+    NAV_ITEM_HEIGHT,
+    PLAY_BUTTON_SIZE,
+    PLAYER_BAR_HEIGHT,
+    SIDEBAR_WIDTH,
+)
+from ui.widgets.cover_frame import CoverFrame
+from ui.widgets.like_button import LikeButton
 from ui.widgets.track_list import format_duration
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "Яндекс Музыка"
 PAGES = (
@@ -44,7 +58,74 @@ VISUALIZER_LABELS = {
     "circular": "Круг",
 }
 SEEK_STEP_MS = 5000
-MIN_WINDOW = (1020, 660)
+THREAD_JOIN_MS = 1500
+VOLUME_STEP = 5
+LOSSLESS_BADGE = "FLAC Lossless"
+MIN_WINDOW = (1120, 680)
+SIDE_PANEL_WIDTH = 264
+TITLE_WIDTH = 140
+
+
+def quality_badge(track: object | None) -> str:
+    """Short quality pill for the player bar: ``FLAC Lossless`` / ``HQ 320``."""
+    if track is None:
+        return ""
+    if getattr(track, "lossless", False):
+        return LOSSLESS_BADGE
+    quality = str(getattr(track, "quality", "") or "").strip()
+    if quality:
+        return quality.upper()
+    bitrate = int(getattr(track, "bitrate", 0) or 0)
+    return f"{bitrate} kbps" if bitrate else ""
+
+
+class VolumePanel(QWidget):
+    """The right-hand section of the player bar.
+
+    Qt delivers a wheel event to the widget under the cursor, so a filter on
+    the panel alone would miss the mute button and the slider.  The panel
+    therefore filters itself and every descendant, which makes «the wheel
+    anywhere here changes the volume» true rather than nearly true.
+    """
+
+    wheel_step = Signal(int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._filtered: list[QObject] = []
+
+    def wheel_step_for(self, delta: int) -> int:
+        return VOLUME_STEP if delta > 0 else -VOLUME_STEP
+
+    def _filter_descendants(self) -> None:
+        for child in self.findChildren(QWidget):
+            if child not in self._filtered:
+                child.installEventFilter(self)
+                self._filtered.append(child)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._filter_descendants()
+
+    def event(self, event) -> bool:  # noqa: N802 - Qt naming
+        # Qt does not run an event filter installed on the watched object
+        # itself, so the panel handles its own wheel here and its children's
+        # through the filter below.
+        if event.type() == QEvent.Type.Wheel and self._take_wheel(event):
+            return True
+        return super().event(event)
+
+    def eventFilter(self, watched: QObject, event) -> bool:  # noqa: N802 - Qt naming
+        if event.type() == QEvent.Type.Wheel and watched is not self and self._take_wheel(event):
+            return True
+        return super().eventFilter(watched, event)
+
+    def _take_wheel(self, event) -> bool:
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if not delta:
+            return False
+        self.wheel_step.emit(self.wheel_step_for(delta))
+        return True
 
 
 class MainWindow(QMainWindow):
@@ -63,6 +144,7 @@ class MainWindow(QMainWindow):
         self._controller = controller
         self._config = config
         self._seeking = False
+        self._closed = False
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(*MIN_WINDOW)
         self.resize(1180, 720)
@@ -102,118 +184,228 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(212)
+        sidebar.setFixedWidth(SIDEBAR_WIDTH)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(14, 18, 14, 18)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 20, 14, 16)
+        layout.setSpacing(6)
         brand = QLabel("♪ Яндекс Музыка")
         brand.setObjectName("Brand")
+        brand.setTextFormat(Qt.TextFormat.RichText)
+        brand.setText(f'<span style="color:{ACCENT}">♪</span>&nbsp; Яндекс Музыка')
         layout.addWidget(brand)
-        layout.addSpacing(10)
+        layout.addSpacing(14)
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
+        self.nav_rows: dict[str, QFrame] = {}
         for key, label in PAGES:
+            row = QFrame()
+            row.setObjectName("NavRow")
+            row.setProperty("active", False)
+            row.setFixedHeight(NAV_ITEM_HEIGHT)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(0)
+            accent = QLabel()
+            accent.setObjectName("NavAccent")
+            accent.setProperty("active", False)
+            accent.setFixedWidth(3)
+            row_layout.addWidget(accent)
             button = QPushButton(label)
             button.setObjectName("NavButton")
             button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _checked, name=key: self.show_page(name))
             self.nav_group.addButton(button)
-            layout.addWidget(button)
+            row_layout.addWidget(button, 1)
+            layout.addWidget(row)
             self.nav_buttons.setdefault(key, button)
+            self.nav_rows.setdefault(key, row)
         layout.addStretch(1)
+        layout.addWidget(self._build_profile_card())
+        layout.addWidget(self._build_logout_button())
+        return sidebar
 
+    def _build_profile_card(self) -> QWidget:
+        card = QFrame()
+        card.setObjectName("ProfileCard")
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+        self.avatar_label = QLabel()
+        self.avatar_label.setObjectName("ProfileAvatar")
+        self.avatar_label.setFixedSize(40, 40)
+        self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.avatar_label)
+
+        text = QVBoxLayout()
+        text.setSpacing(2)
         self.profile_label = QLabel("Не авторизован")
-        self.profile_label.setObjectName("Dim")
+        self.profile_label.setObjectName("ProfileName")
         self.profile_label.setWordWrap(True)
-        layout.addWidget(self.profile_label)
+        self.profile_hint = QLabel("Войдите, чтобы слушать")
+        self.profile_hint.setObjectName("ProfileHint")
+        text.addWidget(self.profile_label)
+        text.addWidget(self.profile_hint)
+        layout.addLayout(text, 1)
+
+        self.plus_badge = QLabel("ПЛЮС")
+        self.plus_badge.setObjectName("PlusBadge")
+        self.plus_badge.setVisible(False)
+        layout.addWidget(self.plus_badge, 0, Qt.AlignmentFlag.AlignTop)
+        return card
+
+    def _build_logout_button(self) -> QPushButton:
         self.logout_button = QPushButton("Выйти")
         self.logout_button.setObjectName("NavButton")
+        self.logout_button.setToolTip("Выйти из аккаунта")
+        self.logout_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.logout_button.setFixedHeight(NAV_ITEM_HEIGHT)
         self.logout_button.clicked.connect(self.logout_requested.emit)
-        layout.addWidget(self.logout_button)
-        return sidebar
+        return self.logout_button
 
     def _build_player_bar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("PlayerBar")
-        bar.setFixedHeight(96)
+        bar.setFixedHeight(PLAYER_BAR_HEIGHT)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(18, 12, 18, 12)
-        layout.setSpacing(14)
+        layout.setContentsMargins(18, 10, 18, 10)
+        layout.setSpacing(16)
+        layout.addWidget(self._build_now_playing(), 1)
+        layout.addWidget(self._build_transport(), 3)
+        layout.addWidget(self._build_volume_panel(), 1)
+        return bar
 
-        self.cover_label = QLabel()
-        self.cover_label.setFixedSize(64, 64)
-        self.cover_label.setObjectName("Cover")
-        self.cover_label.setScaledContents(True)
+    def _build_now_playing(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("NowPlaying")
+        panel.setFixedWidth(SIDE_PANEL_WIDTH)
+        layout = QHBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        self.cover_label = CoverFrame(COVER_SIZE)
         layout.addWidget(self.cover_label)
 
         titles = QVBoxLayout()
-        titles.setSpacing(2)
+        titles.setSpacing(1)
+        titles.setContentsMargins(0, 0, 0, 0)
         self.title_label = QLabel("Ничего не играет")
         self.title_label.setObjectName("TrackTitle")
+        self.title_label.setWordWrap(False)
+        self.title_label.setMaximumWidth(TITLE_WIDTH)
         self.artist_label = QLabel("")
         self.artist_label.setObjectName("TrackArtist")
+        self.artist_label.setMaximumWidth(TITLE_WIDTH)
         titles.addWidget(self.title_label)
         titles.addWidget(self.artist_label)
-        layout.addLayout(titles, 1)
+        layout.addLayout(titles)
+        layout.addStretch(1)
 
-        self.like_button = QPushButton("♥")
-        self.like_button.setObjectName("LikeButton")
-        self.like_button.setCheckable(True)
-        self.like_button.setToolTip("Нравится")
+        self.quality_badge = QLabel("")
+        self.quality_badge.setObjectName("QualityBadge")
+        self.quality_badge.setVisible(False)
+        layout.addWidget(self.quality_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.like_button = LikeButton()
         self.like_button.clicked.connect(self._on_like)
-        layout.addWidget(self.like_button)
+        layout.addWidget(self.like_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        return panel
 
+    def _build_transport(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("Transport")
+        panel.setMinimumWidth(300)
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(14)
+        buttons.addStretch(1)
         self.prev_button = QPushButton("⏮")
+        self.prev_button.setObjectName("TransportButton")
         self.prev_button.setToolTip("Предыдущий трек")
+        self.prev_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.prev_button.setFixedSize(36, 36)
         self.prev_button.clicked.connect(self._controller.prev)
-        layout.addWidget(self.prev_button)
+        buttons.addWidget(self.prev_button)
 
         self.play_button = QPushButton("▶")
-        self.play_button.setObjectName("Accent")
+        self.play_button.setObjectName("PlayButton")
         self.play_button.setToolTip("Играть / пауза")
+        self.play_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_button.setFixedSize(PLAY_BUTTON_SIZE, PLAY_BUTTON_SIZE)
         self.play_button.clicked.connect(self._on_play)
-        layout.addWidget(self.play_button)
+        buttons.addWidget(self.play_button)
 
         self.next_button = QPushButton("⏭")
+        self.next_button.setObjectName("TransportButton")
         self.next_button.setToolTip("Следующий трек")
+        self.next_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.next_button.setFixedSize(36, 36)
         self.next_button.clicked.connect(self._controller.next)
-        layout.addWidget(self.next_button)
+        buttons.addWidget(self.next_button)
+        buttons.addStretch(1)
+        column.addLayout(buttons)
 
-        seek_row = QVBoxLayout()
-        seek_row.setSpacing(2)
+        seek_row = QHBoxLayout()
+        seek_row.setSpacing(10)
+        self.position_label = QLabel("0:00")
+        self.position_label.setObjectName("TimeLabel")
+        self.position_label.setFixedWidth(38)
+        self.position_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        seek_row.addWidget(self.position_label)
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setObjectName("SeekSlider")
+        self.seek_slider.setToolTip("Перемотка")
         self.seek_slider.setRange(0, 0)
+        self.seek_slider.setSingleStep(SEEK_STEP_MS)
         self.seek_slider.sliderMoved.connect(self._on_seek_moved)
         self.seek_slider.sliderReleased.connect(self._on_seek_released)
-        seek_row.addWidget(self.seek_slider)
-        times = QHBoxLayout()
-        self.position_label = QLabel("0:00")
-        self.position_label.setObjectName("Dim")
+        seek_row.addWidget(self.seek_slider, 1)
         self.duration_label = QLabel("0:00")
-        self.duration_label.setObjectName("Dim")
-        times.addWidget(self.position_label)
-        times.addStretch(1)
-        times.addWidget(self.duration_label)
-        seek_row.addLayout(times)
-        layout.addLayout(seek_row, 2)
+        self.duration_label.setObjectName("TimeLabel")
+        self.duration_label.setFixedWidth(38)
+        seek_row.addWidget(self.duration_label)
+        column.addLayout(seek_row)
+        return panel
 
-        self.mute_button = QPushButton("🔊")
-        self.mute_button.setToolTip("Выключить звук")
-        self.mute_button.clicked.connect(self._on_mute)
-        layout.addWidget(self.mute_button)
-
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
-        self.volume_slider.setRange(0, 100)
-        self.volume_slider.setFixedWidth(120)
-        self.volume_slider.valueChanged.connect(self._on_volume)
-        layout.addWidget(self.volume_slider)
+    def _build_volume_panel(self) -> QWidget:
+        self.volume_panel = VolumePanel()
+        self.volume_panel.setObjectName("VolumePanel")
+        self.volume_panel.setFixedWidth(SIDE_PANEL_WIDTH)
+        self.volume_panel.setToolTip("Колесо мыши — громкость")
+        layout = QHBoxLayout(self.volume_panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        layout.addStretch(1)
 
         self.visualizer_button = QPushButton("Спектр")
+        self.visualizer_button.setObjectName("ModeButton")
+        self.visualizer_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.visualizer_button.setToolTip("Переключить визуализатор")
         self.visualizer_button.clicked.connect(self.cycle_visualizer)
-        layout.addWidget(self.visualizer_button)
-        return bar
+        layout.addWidget(self.visualizer_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.mute_button = QPushButton("🔊")
+        self.mute_button.setObjectName("TransportButton")
+        self.mute_button.setToolTip("Выключить звук")
+        self.mute_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mute_button.setFixedSize(32, 32)
+        self.mute_button.clicked.connect(self._on_mute)
+        layout.addWidget(self.mute_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setObjectName("VolumeSlider")
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setSingleStep(VOLUME_STEP)
+        self.volume_slider.setPageStep(VOLUME_STEP * 2)
+        self.volume_slider.setFixedWidth(96)
+        self.volume_slider.setToolTip("Громкость")
+        self.volume_slider.valueChanged.connect(self._on_volume)
+        layout.addWidget(self.volume_slider, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.volume_panel.wheel_step.connect(self._nudge_volume)
+        return self.volume_panel
 
     def _connect_controller(self) -> None:
         controller = self._controller
@@ -256,6 +448,7 @@ class MainWindow(QMainWindow):
         button = self.nav_buttons.get(key)
         if button is not None and button.isCheckable():
             button.setChecked(True)
+        self._mark_active(key)
         self._config.set("last_page", key)
         self.page_changed.emit(key)
         if key == "collection":
@@ -276,8 +469,14 @@ class MainWindow(QMainWindow):
         return self.pages["wave"]  # type: ignore[return-value]
 
     def set_profile(self, login: str, detail: str = "") -> None:
+        """Show the account card: name, hint and the gold «Плюс» badge."""
         text = login or "Не авторизован"
-        self.profile_label.setText(f"{text}\n{detail}" if detail else text)
+        self.profile_label.setText(text)
+        signed_in = bool(login)
+        hint = detail or ("" if signed_in else "Войдите, чтобы слушать")
+        self.profile_hint.setText(hint)
+        self.plus_badge.setVisible(bool(detail) and signed_in)
+        self.logout_button.setEnabled(signed_in)
 
     # -- player bar ---------------------------------------------------------
 
@@ -348,17 +547,32 @@ class MainWindow(QMainWindow):
             return
         pixmap = QPixmap(path)
         if not pixmap.isNull():
-            self.cover_label.setPixmap(
-                pixmap.scaled(
-                    64,
-                    64,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            self.cover_label.set_pixmap(pixmap)
             self.wave_page.set_cover_pixmap(pixmap)
 
     # -- controller mirroring -----------------------------------------------
+
+    def _mark_active(self, key: str) -> None:
+        """Light the pill and the 3px gold bar of the current page only."""
+        for name, row in self.nav_rows.items():
+            active = name == key
+            accent = row.findChild(QLabel, "NavAccent")
+            if row.property("active") == active:
+                continue
+            row.setProperty("active", active)
+            row.style().unpolish(row)
+            row.style().polish(row)
+            if accent is not None:
+                accent.setProperty("active", active)
+                accent.style().unpolish(accent)
+                accent.style().polish(accent)
+
+    def _refresh_quality(self) -> None:
+        """The badge next to the title: lossless, quality name or bitrate."""
+        track = self._controller.current
+        text = quality_badge(track)
+        self.quality_badge.setText(text)
+        self.quality_badge.setVisible(bool(text))
 
     def _refresh_all(self) -> None:
         self._refresh_track()
@@ -372,10 +586,26 @@ class MainWindow(QMainWindow):
         if track is None:
             self.title_label.setText("Ничего не играет")
             self.artist_label.setText("")
+            self._refresh_quality()
+            self._refresh_like()
             return
         self.title_label.setText(track.title)
         self.artist_label.setText(track.artists_name or track.album)
+        self._refresh_quality()
         self._refresh_like()
+        self._refresh_lists(track.id)
+
+    def _refresh_lists(self, track_id: str) -> None:
+        """Move the gold playing marker to ``track_id`` in every track list."""
+        for key in ("collection", "search"):
+            page = self.pages.get(key)
+            if not isinstance(page, (CollectionPage, SearchPage)):
+                continue
+            for section in page.sections:
+                widget = page.list_for(section)
+                marker = getattr(widget, "set_tracks_playing", None)
+                if callable(marker):
+                    marker(track_id)
 
     def _refresh_like(self) -> None:
         track = self._controller.current
@@ -408,15 +638,41 @@ class MainWindow(QMainWindow):
             self.seek_slider.setValue(self._controller.position_ms)
         self.duration_label.setText(format_duration(duration))
 
+    def _nudge_volume(self, step: int) -> None:
+        """A wheel notch over the right panel moves the volume by one step."""
+        self._controller.set_volume(self._controller.volume + step)
+
     def _show_error(self, message: str) -> None:
         if message:
             self.statusBar().showMessage(message, 6000)
 
     # -- window -------------------------------------------------------------
 
+    def shutdown(self) -> None:
+        """Stop everything this window owns; safe to call more than once.
+
+        Playback, the visualizer clocks and the request thread are stopped in
+        that order, then the thread is joined. Without the join Qt destroys a
+        running ``QThread`` on exit, which aborts the process with
+        ``QThread: Destroyed while thread is still running``.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self.wave_page.visualizer.stop_all()
+        self._controller.stop()
+        self._controller.shutdown()
+        service = self._controller.service
+        service.shutdown()
+        worker = service.worker
+        worker.quit()
+        worker.wait(THREAD_JOIN_MS)
+        log.debug("window torn down in %s ms", THREAD_JOIN_MS)
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._config.set_volume(self._controller.volume)
         self._config.set_visualizer(self.wave_page.visualizer.mode)
+        self.shutdown()
         super().closeEvent(event)
 
     def restore_page(self) -> str:
@@ -424,4 +680,15 @@ class MainWindow(QMainWindow):
         return self.show_page(str(self._config.get("last_page", "wave") or "wave"))
 
 
-__all__ = ["APP_NAME", "MIN_WINDOW", "PAGES", "SEEK_STEP_MS", "VISUALIZER_LABELS", "MainWindow"]
+__all__ = [
+    "APP_NAME",
+    "MIN_WINDOW",
+    "PAGES",
+    "SIDE_PANEL_WIDTH",
+    "SEEK_STEP_MS",
+    "THREAD_JOIN_MS",
+    "VISUALIZER_LABELS",
+    "VOLUME_STEP",
+    "MainWindow",
+    "quality_badge",
+]

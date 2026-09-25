@@ -13,6 +13,7 @@ from typing import Sequence
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -82,8 +83,14 @@ class WavePage(QWidget):
         header.addWidget(self.start_button)
         root.addLayout(header)
 
-        self.stage = VisualizerStack(self)
-        root.addWidget(self.stage, 1)
+        self.card = QFrame()
+        self.card.setObjectName("WaveCard")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        self.stage = VisualizerStack(self.card)
+        card_layout.addWidget(self.stage, 1)
+        root.addWidget(self.card, 1)
 
         self.groups = {
             "mood": ChipGroup("Настроение", MOOD_CHOICES),

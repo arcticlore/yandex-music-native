@@ -40,9 +40,16 @@ RETRY_TOTAL = 3
 RETRY_BACKOFF_FACTOR = 0.3
 RETRY_STATUSES = (500, 502, 503, 504)
 RETRY_METHODS = frozenset({"HEAD", "GET", "PUT", "OPTIONS", "TRACE", "DELETE"})
+# Generating «Моя волна» recommendations regularly takes 8-10 seconds, so a read
+# timeout below ~20s cut healthy station calls in half. The connect timeout stays
+# short: a dead route should fail fast and be retried, not waited out.
 CONNECT_TIMEOUT_S = 5.0
-READ_TIMEOUT_S = 10.0
-COVER_TIMEOUTS = (CONNECT_TIMEOUT_S, READ_TIMEOUT_S)
+READ_TIMEOUT_S = 25.0
+API_TIMEOUTS = (CONNECT_TIMEOUT_S, READ_TIMEOUT_S)
+# Covers are small files on a CDN: a slow read here only delays the icon
+# fallback, so it keeps the shorter budget.
+COVER_READ_TIMEOUT_S = 10.0
+COVER_TIMEOUTS = (CONNECT_TIMEOUT_S, COVER_READ_TIMEOUT_S)
 DEFAULT_HEADERS = {
     "User-Agent": YANDEX_USER_AGENT,
     # The header the API itself sends; kept so nothing in the request looks foreign.
@@ -164,6 +171,8 @@ def _pooled_request_class() -> type:
         def _request_wrapper(self, *args: Any, **kwargs: Any) -> bytes:
             from yandex_music.exceptions import NetworkError, TimedOutError
 
+            kwargs = dict(kwargs)
+            kwargs.setdefault("timeout", self._timeout)
             kwargs = self._prepare_kwargs(kwargs)
             headers = dict(kwargs.get("headers") or {})
             headers["User-Agent"] = YANDEX_USER_AGENT
@@ -184,8 +193,12 @@ def _pooled_request_class() -> type:
 
 
 def pooled_request() -> Any:
-    """A ``yandex_music`` request object that uses the shared session."""
-    return _pooled_request_class()()
+    """A ``yandex_music`` request object that uses the shared session.
+
+    ``timeout`` is handed to the library, which puts it on every call it makes,
+    so the API budget lives in one place instead of in each call site.
+    """
+    return _pooled_request_class()(timeout=API_TIMEOUTS)
 
 
 def build_client(token: str | None = None) -> Any:
@@ -196,6 +209,7 @@ def build_client(token: str | None = None) -> Any:
 
 
 __all__ = [
+    "API_TIMEOUTS",
     "CONNECT_TIMEOUT_S",
     "COVER_TIMEOUTS",
     "DEFAULT_HEADERS",

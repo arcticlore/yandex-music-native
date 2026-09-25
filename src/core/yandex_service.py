@@ -1069,6 +1069,11 @@ class YandexService(QObject):
         return self._feedback.busy
 
     @property
+    def worker(self) -> Any:
+        """The request thread, so a window can join it on the way out."""
+        return self._worker
+
+    @property
     def from_field(self) -> str:
         uid = self.uid
         try:

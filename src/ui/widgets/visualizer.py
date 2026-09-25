@@ -563,6 +563,11 @@ class VisualizerStack(QWidget):
         for widget in self._visualizers.values():
             widget.reset_data()
 
+    def stop_all(self) -> None:
+        """Stop every clock, including the hidden ones, for a clean exit."""
+        for widget in self._visualizers.values():
+            widget.stop()
+
 
 __all__ = [
     "ACCENT_HIGH",

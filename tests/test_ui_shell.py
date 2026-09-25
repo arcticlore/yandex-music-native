@@ -18,8 +18,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QPixmap, QWheelEvent
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QSystemTrayIcon
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -759,3 +760,159 @@ def test_main_window_visualizer_cycle_and_persistence(app, config: ConfigManager
         check("visualizer persisted", config.get_visualizer() == "circular")
     finally:
         rig.close()
+
+
+# -- redesign: painted rows, teardown and the volume wheel --------------------
+
+
+def test_track_rows_use_the_painted_delegate(app) -> None:
+    from core.yandex_service import WaveTrack
+    from ui.widgets.track_list import TRACK_ROW_HEIGHT, TrackRowDelegate, album_column_width
+
+    listing = TrackList()
+    listing.set_tracks(
+        [
+            WaveTrack(
+                id="1",
+                track_id="t1",
+                title="Кино",
+                artists=("Дельфин",),
+                album="Небо с вами",
+                duration_ms=215000,
+                liked=True,
+            ),
+            WaveTrack(id="2", track_id="t2", title="Second", artists=("Other",), explicit=True),
+        ]
+    )
+    check("delegate installed", isinstance(listing.itemDelegate(), TrackRowDelegate))
+    check(
+        "row height",
+        listing.itemDelegate().sizeHint(None, listing.model().index(0, 0)).height() == TRACK_ROW_HEIGHT,
+    )
+    check("album column for a wide row", album_column_width(900) > 0)
+    check("album column dropped when narrow", album_column_width(420) == 0)
+    check("text is still readable", listing.item(0).text().startswith("Кино — Дельфин"))
+    check("duration rendered", listing.item(0).text().endswith("3:35"))
+    check("no row is playing yet", not _is_playing(listing, 0))
+    listing.set_tracks_playing("t2")
+    check("playing marker moved", _is_playing(listing, 1) and not _is_playing(listing, 0))
+
+    listing.resize(760, TRACK_ROW_HEIGHT * 2)
+    listing.show()
+    app.processEvents()
+    image = listing.grab().toImage()
+    check("gold marker painted", _is_gold(image.pixelColor(4, TRACK_ROW_HEIGHT + 20).name()))
+    check("plain row has no marker", not _is_gold(image.pixelColor(4, 20).name()))
+    listing.deleteLater()
+
+
+def test_entry_rows_carry_a_kind_subtitle(app) -> None:
+    from ui.widgets.track_list import entry_item
+
+    item = entry_item(CatalogItem(id="9", title="Кино", subtitle="Дельфин", kind="album"), 0)
+    check("entry title", "Кино" in item.text())
+    check("entry kind in the subtitle", "album · Дельфин" in item.text())
+    check("entry selectable", bool(item.flags() & Qt.ItemFlag.ItemIsSelectable))
+
+
+def test_volume_wheel_works_anywhere_in_the_right_panel(app, config: ConfigManager) -> None:
+    rig = Rig(app)
+    try:
+        rig.login()
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        window.volume_slider.setValue(40)
+        _wheel(window.volume_panel, QPoint(30, 20), 120)
+        check(
+            "wheel over the panel raises the volume",
+            window.volume_slider.value() == 45,
+            str(window.volume_slider.value()),
+        )
+        _wheel(window.mute_button, QPointF(window.mute_button.width() / 2, 5), 120)
+        check(
+            "wheel over a child button keeps working",
+            window.volume_slider.value() == 50,
+            str(window.volume_slider.value()),
+        )
+        _wheel(window.volume_panel, QPoint(30, 20), -120)
+        check(
+            "wheel down lowers the volume",
+            window.volume_slider.value() == 45,
+            str(window.volume_slider.value()),
+        )
+        window.close()
+    finally:
+        rig.close()
+
+
+def test_wave_page_stage_sits_in_a_card(app, config: ConfigManager) -> None:
+    rig = Rig(app)
+    try:
+        rig.login()
+        window = MainWindow(rig.controller, config)
+        check("card object name", window.wave_page.card.objectName() == "WaveCard")
+        check("stage inside the card", window.wave_page.stage.parent() is window.wave_page.card)
+        check("card styled", "QFrame#WaveCard" in app.styleSheet())
+        window.close()
+    finally:
+        rig.close()
+
+
+def test_shutdown_stops_everything_and_is_idempotent(app, config: ConfigManager) -> None:
+    rig = Rig(app)
+    try:
+        rig.login()
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        rig.client.batches = [make_batch_stub([61, 62, 63])]
+        window.wave_page.start_wave()
+        for _ in range(40):
+            app.processEvents()
+        stack = window.wave_page.visualizer
+        check(
+            "a visualizer clock runs before shutdown", _running_clocks(stack) > 0, str(_running_clocks(stack))
+        )
+        window.shutdown()
+        check("no visualizer clock survives", _running_clocks(stack) == 0, str(_running_clocks(stack)))
+        check("the engine was released", rig.controller.engine.stopped >= 1)
+        check("the service worker stopped", not rig.controller.service.worker.isRunning())
+        window.shutdown()
+        check("a second shutdown is a no-op", _running_clocks(stack) == 0)
+        window.close()
+        check("close after shutdown is safe", True)
+    finally:
+        rig.close()
+
+
+def _running_clocks(stack: VisualizerStack) -> int:
+    return sum(1 for widget in stack._visualizers.values() if widget._timer.isActive())
+
+
+def _is_playing(listing: TrackList, row: int) -> bool:
+    from ui.widgets.track_list import _ROLE_PLAYING
+
+    return bool(listing.item(row).data(_ROLE_PLAYING))
+
+
+def _is_gold(name: str) -> bool:
+    value = name.lstrip("#")
+    red, green, blue = int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    return red > 215 and 120 < green < 225 and blue < 80
+
+
+def _wheel(widget, position, delta: int) -> None:
+    point = QPointF(position)
+    event = QWheelEvent(
+        point,
+        QPointF(widget.mapToGlobal(point.toPoint())),
+        QPoint(0, 0),
+        QPoint(0, delta),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    app = QApplication.instance()
+    app.sendEvent(widget, event)

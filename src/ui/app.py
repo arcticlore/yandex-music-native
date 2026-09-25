@@ -196,12 +196,19 @@ def main(argv: list[str] | None = None) -> int:
     window.restore_page()
     window.show()
     held = attach_integrations(window, playback, config, app)
+    # Quitting from the tray or over MPRIS never sends closeEvent, so the same
+    # teardown is bound to the application itself. MainWindow.shutdown() is
+    # idempotent, whichever path arrives first.
+    app.aboutToQuit.connect(window.shutdown)
     app._yml_integrations = held  # noqa: SLF001
     app._yml_window = window  # noqa: SLF001
     app._yml_playback = playback  # noqa: SLF001
     app._yml_config = config  # noqa: SLF001
     app._yml_auth = auth  # noqa: SLF001
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        window.shutdown()
 
 
 if __name__ == "__main__":

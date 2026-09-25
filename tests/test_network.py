@@ -29,10 +29,13 @@ from urllib3.util import connection as urllib3_connection  # noqa: E402
 
 from core import network  # noqa: E402
 from core.network import (  # noqa: E402
+    API_TIMEOUTS,
+    CONNECT_TIMEOUT_S,
     COVER_TIMEOUTS,
     DEFAULT_HEADERS,
     POOL_CONNECTIONS,
     POOL_MAXSIZE,
+    READ_TIMEOUT_S,
     RETRY_BACKOFF_FACTOR,
     RETRY_TOTAL,
     YANDEX_USER_AGENT,
@@ -89,6 +92,33 @@ def test_post_requests_are_never_replayed() -> None:
     assert "POST" not in (policy.allowed_methods or set()), "rotor feedback must not be duplicated"
     assert "GET" in policy.allowed_methods
     assert policy.raise_on_status is False
+
+
+def test_api_timeouts_tolerate_a_slow_link() -> None:
+    """A mobile connection needs more than the ten seconds covers get."""
+    assert CONNECT_TIMEOUT_S == 5.0
+    assert READ_TIMEOUT_S == 25.0
+    assert API_TIMEOUTS == (5.0, 25.0)
+    assert COVER_TIMEOUTS == (CONNECT_TIMEOUT_S, 10.0), "covers stay snappy"
+
+
+def test_pooled_request_uses_the_api_timeouts() -> None:
+    client = build_client("token-value-000000")
+    calls: list[dict] = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b'{"result": {"ok": true}}'
+
+    class RecordingSession:
+        def request(self, *args: object, **kwargs: object) -> FakeResponse:
+            calls.append(kwargs)
+            return FakeResponse()
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(network, "network_session", lambda: RecordingSession())
+        client._request._request_wrapper("GET", "https://api.music.yandex.net/settings")
+    assert calls[0]["timeout"] == API_TIMEOUTS, "the engine owns the API timeout"
 
 
 def test_cover_timeouts_come_from_the_network_engine() -> None:
