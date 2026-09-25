@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      YAMUSIC_AO: "null"
+      YAMUSIC_SMOKE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libmpv2 ffmpeg libgl1 libegl1 libxkbcommon0 libxcb-cursor0 \
+            libdbus-1-3 libsecret-1-0 dbus
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install Python deps
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+      - name: Ruff check
+        run: ruff check src tests
+      - name: Byte-compile
+        run: python -m compileall -q src tests
+      - name: Pytest
+        run: python -m pytest -q
+      - name: MPRIS self-test (private session bus)
+        run: dbus-run-session -- python tests/mpris_selftest.py
+      - name: Audio pipeline
+        run: python tests/audio_pipeline.py
+
+  deb:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build .deb
+        run: bash packaging/debian/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: dist/*.deb
+
+  tarball:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source tarball
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          NAME=yandex-music-native
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="${NAME}-${VERSION}/" \
+            -o "dist/${NAME}-${VERSION}-src.tar.gz" HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-tarball
+          path: dist/*.tar.gz
+
+  appimage:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpv2 fuse desktop-file-utils
+          sudo apt-get install -y python3-pip patchelf
+      - name: Fetch appimagetool
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL -o "$HOME/bin/appimagetool" \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x "$HOME/bin/appimagetool"
+          # extract-and-run avoids FUSE in CI
+          cd "$HOME/bin" && ./appimagetool --appimage-extract >/dev/null 2>&1 || true
+          echo "$HOME/bin" >> "$GITHUB_PATH"      - name: Build AppImage
+        env:
+          APPIMAGE_TOOL: ${{ runner.temp }}/appimagetool-wrap.sh
+          ARCH: x86_64
+        run: |
+          # wrap: run extracted tool without FUSE
+          if [ -x "$HOME/bin/squashfs-root/AppRun" ]; then
+            printf '#!/bin/sh\nexec "$HOME/bin/squashfs-root/AppRun" "$@"\n' > "$APPIMAGE_TOOL"
+            # $HOME must expand at runtime:
+            printf '#!/bin/sh\nexec "%s/bin/squashfs-root/AppRun" "$@"\n' "$HOME" > "$APPIMAGE_TOOL"
+          else
+            printf '#!/bin/sh\nexec "%s/bin/appimagetool" "$@"\n' "$HOME" > "$APPIMAGE_TOOL"
+          fi
+          chmod +x "$APPIMAGE_TOOL"
+          bash scripts/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*.AppImage
+
+  release:
+    needs: [deb, tarball, appimage]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.deb' -o -name '*.tar.gz' -o -name '*.AppImage' \) \
+            -exec cp {} release/ \;
+          ls -la release/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

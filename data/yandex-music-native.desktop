@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Yandex Music
+Name[ru]=Яндекс Музыка
+GenericName=Music Player
+GenericName[ru]=Музыкальный плеер
+Comment=Native Qt6/libmpv client for Yandex Music
+Comment[ru]=Нативный Qt6/libmpv клиент Яндекс Музыки
+Exec=yandex-music-native %U
+Icon=yandex-music-native
+Terminal=false
+StartupNotify=true
+StartupWMClass=yandex-music-native
+Categories=AudioVideo;Audio;Player;
+Keywords=music;yandex;audio;player;streaming;mpv;media;
+Keywords[ru]=музыка;яндекс;аудио;плеер;стриминг;mpv;
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;
+DBusActivatable=false
+X-GNOME-UsesNotifications=true
+X-KDE-StartupNotify=true

@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.yamusic.YandexMusicNative
+Exec=/usr/local/bin/yandex-music-native

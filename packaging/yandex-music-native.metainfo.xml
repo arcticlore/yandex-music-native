@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.yamusic.YandexMusicNative</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Yandex Music Native</name>
+  <name xml:lang="ru">Яндекс Музыка (нативный)</name>
+  <summary>Native Linux client for Yandex Music</summary>
+  <summary xml:lang="ru">Нативный Linux-клиент Яндекс Музыки</summary>
+  <description>
+    <p>
+      Lightweight native desktop client for Yandex Music built with PySide6
+      (Qt 6), libmpv and NumPy. No Electron, no WebView.
+    </p>
+    <p xml:lang="ru">
+      Лёгкий нативный клиент Яндекс Музыки на PySide6 (Qt 6), libmpv и NumPy.
+      Без Electron и WebView.
+    </p>
+  </description>
+  <launchable type="desktop-id">yandex-music-native.desktop</launchable>
+  <url type="homepage">https://github.com/yandex-music-native/yandex-music-native</url>
+  <provides>
+    <binary>yandex-music-native</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Music</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-09-24"/>
+  </releases>
+</component>
