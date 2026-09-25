@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,6 +80,17 @@ def raises(name: str, exception: type[Exception], call, *args, **kwargs) -> None
     except Exception as exc:  # noqa: BLE001
         raise AssertionError(f"{name} FAILED unexpected {type(exc).__name__}: {exc}") from exc
     raise AssertionError(f"{name} FAILED no exception raised")
+
+
+def is_iso_utc(value: object) -> bool:
+    """True when the value is an ISO 8601 timestamp with a UTC offset."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0)
 
 
 # -- model factories --------------------------------------------------------
@@ -231,6 +243,7 @@ class FakeClient:
         payload = {
             "station": station,
             "type": type_,
+            "timestamp": timestamp,
             "from": from_,
             "batch_id": batch_id,
             "total_played_seconds": total_played_seconds,
@@ -597,6 +610,25 @@ def test_wave_start(app: QApplication) -> None:
     check("wave feedback from field", client.feedback_calls[0]["from"] == "mobile-radio-user-12345")
     check("wave no feedback error", errors == [], str(errors))
     check("wave batch_id stored", client.feedback_calls[1]["batch_id"] == "b-1")
+    check(
+        "feedback timestamps are ISO 8601",
+        all(is_iso_utc(item["timestamp"]) for item in client.feedback_calls),
+        str(client.feedback_calls),
+    )
+    check(
+        "track feedback carries batch and track id",
+        all(
+            item["batch_id"] and item["track_id"]
+            for item in client.feedback_calls
+            if item["type"] != FEEDBACK_RADIO_STARTED
+        ),
+        str(client.feedback_calls),
+    )
+    check(
+        "radio started has no track id",
+        client.feedback_calls[0]["track_id"] is None,
+        str(client.feedback_calls[0]),
+    )
     check("wave no duplicate batch", batches == [])
 
     service.shutdown()

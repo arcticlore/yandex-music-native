@@ -42,6 +42,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -1449,6 +1450,14 @@ class YandexService(QObject):
         track: WaveTrack | None = None,
         played_seconds: float | None = None,
     ) -> bool:
+        """Send one rotor feedback event with a payload the API accepts.
+
+        The API expects an ISO 8601 ``timestamp`` and, for track events, both the
+        station ``batch_id`` and a ``track_id``; a message without them is
+        rejected as "condition is not met". ``station`` travels in the documented
+        ``type:tag`` wire form (``user:onyourwave`` is the personal station),
+        because the endpoint carries it in the request path.
+        """
         if not self._token:
             return False
         if not self._wave_started and event != FEEDBACK_RADIO_STARTED:
@@ -1461,6 +1470,10 @@ class YandexService(QObject):
             if track is not None:
                 batch_id = self._track_batches.get(track.track_id) or batch_id
         track_id = _track_key(track) if track is not None else None
+        if event != FEEDBACK_RADIO_STARTED:
+            if not batch_id or not track_id:
+                log.debug("feedback %s skipped: batch_id=%r track_id=%r", event, batch_id, track_id)
+                return False
         seconds = played_seconds
         if seconds is None and track is not None and self._current_since:
             seconds = max(0.0, time.monotonic() - self._current_since)
@@ -1477,6 +1490,7 @@ class YandexService(QObject):
             return client.rotor_station_feedback(
                 station,
                 event,
+                timestamp=_feedback_timestamp(),
                 from_=origin,
                 batch_id=batch_id,
                 total_played_seconds=total,
@@ -1487,7 +1501,7 @@ class YandexService(QObject):
             self.feedback_sent.emit(track_id or "", event)
 
         def err(exc: Exception) -> None:
-            log.info("feedback %s failed: %s", event, exc)
+            log.debug("feedback %s failed: %s", event, exc)
 
         return self._submit(_Job(f"feedback:{event}", call, ok, err))
 
@@ -1669,6 +1683,11 @@ class YandexService(QObject):
         """The validated mood/activity/language/diversity selection."""
         with self._lock:
             return self._preferences
+
+
+def _feedback_timestamp() -> str:
+    """Current UTC time in the ISO 8601 form expected by the rotor feedback API."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _track_key(track: Any) -> str:

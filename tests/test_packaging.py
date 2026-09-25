@@ -101,7 +101,7 @@ def test_dependencies_match_the_imports(pyproject: dict) -> None:
     source = "".join(
         path.read_text("utf-8") for path in tracked_files() if path.suffix == ".py" and "src" in path.parts
     )
-    for package in ("PySide6", "numpy", "mpv", "yandex_music", "keyring"):
+    for package in ("PySide6", "numpy", "mpv", "yandex_music", "keyring", "requests"):
         assert re.search(rf"(?:^|\n)\s*(?:from|import)\s+{package}\b", source), (
             f"{package} is declared but unused"
         )

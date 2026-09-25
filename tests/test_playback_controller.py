@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -37,12 +38,18 @@ from yandex_music import (  # noqa: E402
 )
 
 from core.playback_controller import (  # noqa: E402
+    COVER_TIMEOUTS,
+    COVER_USER_AGENT,
+    CoverDownloadError,
     PlaybackController,
     PlaybackState,
     QueueMode,
     TrackMetadata,
+    _cover_session,
     cover_cache_dir,
     cover_file_name,
+    default_cover_path,
+    download_cover,
     link_summary,
 )
 from core.yandex_service import (  # noqa: E402
@@ -1077,6 +1084,9 @@ def test_cover_cache(app: QApplication) -> None:
         def failing(url: str, target: Path) -> None:
             raise RuntimeError("download failed")
 
+        fallback = default_cover_path()
+        check("app icon located", fallback is not None, str(fallback))
+        check("cover timeouts", COVER_TIMEOUTS == (5.0, 10.0), str(COVER_TIMEOUTS))
         other = Rig(app)
         try:
             other.controller = PlaybackController(
@@ -1085,15 +1095,106 @@ def test_cover_cache(app: QApplication) -> None:
                 cover_dir=other.cover_dir,
                 cover_downloader=failing,
             )
+            other.controller.cover_ready.connect(
+                lambda track_id, path: other.events.append(("cover", track_id, path))
+            )
             other.controller.play_track(make_track(1002, cover_uri=cover_uri))
             check("cover failure settles", other.settle())
             check("cover failure handled", wait_for(app, lambda: not other.controller._cover_inflight, 3.0))
-            check("cover failure no path", other.controller.cover_path("1002:7") is None)
+            check(
+                "cover failure falls back to app icon",
+                fallback is not None and other.controller.cover_path("1002:7") == str(fallback),
+                other.controller.cover_path("1002:7"),
+            )
+            check(
+                "cover fallback signal",
+                fallback is not None
+                and any(
+                    item[0] == "cover" and item[1] == "1002:7" and item[2] == str(fallback)
+                    for item in other.events
+                ),
+                str(other.events[-3:]),
+            )
         finally:
             other.controller.shutdown()
             other.service.shutdown()
     finally:
         rig.close()
+
+
+class FakeResponse:
+    def __init__(self, chunks: list[bytes], error: Exception | None = None) -> None:
+        self._chunks = chunks
+        self._error = error
+        self.closed = False
+
+    def raise_for_status(self) -> None:
+        if self._error is not None:
+            raise self._error
+
+    def iter_content(self, size: int):
+        if self._error is not None:
+            raise self._error
+        for chunk in self._chunks:
+            yield chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeSession:
+    def __init__(self, response: FakeResponse | None = None, error: Exception | None = None) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[tuple] = []
+
+    def get(self, url: str, stream: bool = False, timeout=None):
+        self.calls.append((url, stream, timeout))
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+def test_cover_downloader(monkeypatch, tmp_path: Path) -> None:
+    session = FakeSession(FakeResponse([b"\x89PNG\r\n\x1a\n", b"cover-bytes"]))
+    monkeypatch.setattr("core.playback_controller._cover_session", lambda: session)
+    target = tmp_path / "cover.png"
+    download_cover("https://avatars.yandex.net/get-music/cover.png", target)
+    check("cover downloader writes target", target.read_bytes() == b"\x89PNG\r\n\x1a\ncover-bytes")
+    check("cover downloader streams", session.calls[0][1] is True, str(session.calls))
+    check("cover downloader timeouts", session.calls[0][2] == (5.0, 10.0), str(session.calls))
+    check("cover downloader closes response", session.response is not None and session.response.closed)
+    check("cover downloader no partial left", not target.with_name(target.name + ".part").exists())
+
+    big = FakeSession(FakeResponse([b"x" * (1024 * 1024)] * 9))
+    monkeypatch.setattr("core.playback_controller._cover_session", lambda: big)
+    with pytest.raises(CoverDownloadError):
+        download_cover("https://avatars.yandex.net/get-music/huge.png", tmp_path / "huge.png")
+    check("oversized cover refused", not (tmp_path / "huge.png").exists())
+    check("oversized cover cleaned", not (tmp_path / "huge.png.part").exists())
+
+    empty = FakeSession(FakeResponse([]))
+    monkeypatch.setattr("core.playback_controller._cover_session", lambda: empty)
+    with pytest.raises(CoverDownloadError):
+        download_cover("https://avatars.yandex.net/get-music/empty.png", tmp_path / "empty.png")
+    check("empty cover refused", not (tmp_path / "empty.png").exists())
+
+    offline = FakeSession(error=requests.exceptions.SSLError("handshake timeout"))
+    monkeypatch.setattr("core.playback_controller._cover_session", lambda: offline)
+    with pytest.raises(CoverDownloadError):
+        download_cover("https://avatars.yandex.net/get-music/cover.jpg", tmp_path / "ssl.png")
+    check("network error reported as cover error", not (tmp_path / "ssl.png").exists())
+
+    http_error = FakeSession(FakeResponse([], error=requests.exceptions.HTTPError("404")))
+    monkeypatch.setattr("core.playback_controller._cover_session", lambda: http_error)
+    with pytest.raises(CoverDownloadError):
+        download_cover("https://avatars.yandex.net/get-music/missing.png", tmp_path / "missing.png")
+    check("http error reported as cover error", not (tmp_path / "missing.png").exists())
+
+
+def test_cover_session_is_reused() -> None:
+    check("cover session pooled", _cover_session() is _cover_session())
+    check("cover session user agent", COVER_USER_AGENT in _cover_session().headers.get("User-Agent", ""))
 
 
 def test_stale_stream_and_link_cache(app: QApplication) -> None:

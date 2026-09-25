@@ -13,14 +13,15 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 import urllib.parse
-import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+import requests
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from core import station
@@ -40,13 +41,32 @@ from core.yandex_service import (
 log = logging.getLogger(__name__)
 
 POSITION_INTERVAL_MS = 200
-COVER_TIMEOUT_S = 12.0
+COVER_CONNECT_TIMEOUT_S = 5.0
+COVER_READ_TIMEOUT_S = 10.0
+COVER_TIMEOUTS = (COVER_CONNECT_TIMEOUT_S, COVER_READ_TIMEOUT_S)
 COVER_MAX_BYTES = 8 * 1024 * 1024
 COVER_CHUNK_BYTES = 64 * 1024
 COVER_USER_AGENT = "yandex-music-native/0.1"
 COVER_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+APP_ICON_NAME = "yandex-music-native.svg"
 
 CoverDownloader = Callable[[str, Path], None]
+
+_sessions = threading.local()
+
+
+class CoverDownloadError(RuntimeError):
+    """The cover could not be fetched; the caller may fall back to the app icon."""
+
+
+def _cover_session() -> requests.Session:
+    """One pooled session per worker thread: connections are reused, no shared state."""
+    session = getattr(_sessions, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": COVER_USER_AGENT})
+        _sessions.session = session
+    return session
 
 
 def cover_cache_dir() -> Path:
@@ -65,24 +85,50 @@ def cover_file_name(url: str) -> str:
     return f"{digest}{suffix}"
 
 
+def default_cover_path() -> Path | None:
+    """Locate the packaged application icon used when a cover is unavailable."""
+    roots = [
+        Path("/usr/share/icons/hicolor/scalable/apps"),
+        Path("/usr/local/share/icons/hicolor/scalable/apps"),
+        Path.home() / ".local/share/icons/hicolor/scalable/apps",
+        Path(__file__).resolve().parents[2] / "packaging/icons/hicolor/scalable/apps",
+    ]
+    for root in roots:
+        candidate = root / APP_ICON_NAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def download_cover(url: str, target: Path) -> None:
-    """Fetch a cover into ``target`` atomically, refusing oversized answers."""
-    request = urllib.request.Request(url, headers={"User-Agent": COVER_USER_AGENT})
+    """Fetch a cover into ``target`` atomically with connect/read timeouts.
+
+    Network problems raise :class:`CoverDownloadError` so that the caller can
+    show the application icon instead of an empty cover slot.
+    """
     partial = target.with_name(target.name + ".part")
     try:
-        with urllib.request.urlopen(request, timeout=COVER_TIMEOUT_S) as response:
+        try:
+            response = _cover_session().get(url, stream=True, timeout=COVER_TIMEOUTS)
+        except requests.RequestException as exc:
+            raise CoverDownloadError(f"обложка недоступна: {exc}") from exc
+        try:
+            response.raise_for_status()
             with partial.open("wb") as handle:
                 total = 0
-                while True:
-                    chunk = response.read(COVER_CHUNK_BYTES)
+                for chunk in response.iter_content(COVER_CHUNK_BYTES):
                     if not chunk:
-                        break
+                        continue
                     total += len(chunk)
                     if total > COVER_MAX_BYTES:
-                        raise RuntimeError("обложка слишком большая")
+                        raise CoverDownloadError("обложка слишком большая")
                     handle.write(chunk)
+        except requests.RequestException as exc:
+            raise CoverDownloadError(f"обложка недоступна: {exc}") from exc
+        finally:
+            response.close()
         if not partial.exists() or partial.stat().st_size == 0:
-            raise RuntimeError("сервер вернул пустую обложку")
+            raise CoverDownloadError("сервер вернул пустую обложку")
         os.replace(partial, target)
     finally:
         partial.unlink(missing_ok=True)
@@ -181,8 +227,12 @@ class _CoverTask(QRunnable):
         try:
             self._downloader(self._url, self._target)
         except Exception as exc:  # noqa: BLE001
-            log.info("cover download failed for %s: %s", self._track_id, exc)
-            self._signals.failed.emit(self._track_id, str(exc))
+            log.debug("cover download failed for %s: %s", self._track_id, exc)
+            fallback = default_cover_path()
+            if fallback is None:
+                self._signals.failed.emit(self._track_id, str(exc))
+                return
+            self._signals.finished.emit(self._track_id, str(fallback))
             return
         self._signals.finished.emit(self._track_id, str(self._target))
 
@@ -950,15 +1000,20 @@ class PlaybackController(QObject):
 
 
 __all__ = [
+    "COVER_CHUNK_BYTES",
+    "COVER_CONNECT_TIMEOUT_S",
     "COVER_MAX_BYTES",
-    "COVER_TIMEOUT_S",
+    "COVER_READ_TIMEOUT_S",
+    "COVER_TIMEOUTS",
     "POSITION_INTERVAL_MS",
+    "CoverDownloadError",
     "PlaybackController",
     "PlaybackState",
     "QueueMode",
     "TrackMetadata",
     "cover_cache_dir",
     "cover_file_name",
+    "default_cover_path",
     "download_cover",
     "link_summary",
 ]

@@ -3,3 +3,4 @@ python-mpv>=1.0.5
 yandex-music>=3.0
 numpy>=1.26
 keyring>=24.0
+requests>=2.31
