@@ -97,15 +97,14 @@ jobs:
           chmod +x "$HOME/bin/appimagetool"
           # extract-and-run avoids FUSE in CI
           cd "$HOME/bin" && ./appimagetool --appimage-extract >/dev/null 2>&1 || true
-          echo "$HOME/bin" >> "$GITHUB_PATH"      - name: Build AppImage
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: Build AppImage
         env:
           APPIMAGE_TOOL: ${{ runner.temp }}/appimagetool-wrap.sh
           ARCH: x86_64
         run: |
           # wrap: run extracted tool without FUSE
           if [ -x "$HOME/bin/squashfs-root/AppRun" ]; then
-            printf '#!/bin/sh\nexec "$HOME/bin/squashfs-root/AppRun" "$@"\n' > "$APPIMAGE_TOOL"
-            # $HOME must expand at runtime:
             printf '#!/bin/sh\nexec "%s/bin/squashfs-root/AppRun" "$@"\n' "$HOME" > "$APPIMAGE_TOOL"
           else
             printf '#!/bin/sh\nexec "%s/bin/appimagetool" "$@"\n' "$HOME" > "$APPIMAGE_TOOL"
