@@ -5,7 +5,7 @@
 #   make install-user   — same layout under ~/.local (no root)
 #   sudo make uninstall — remove every installed program file
 #
-# No Flatpak/Snap. Optional: make build-deb / make appimage
+# No Flatpak/Snap. Optional: make build-deb / make build-rpm / make appimage
 
 APP         := yandex-music-native
 PROJECT     := yandex-music-linux
@@ -21,6 +21,7 @@ PACKAGE     := packaging
 ASSETS      := $(PACKAGE)/icons/hicolor
 METAINFO    := org.arcticlore.YandexMusicNative.metainfo.xml
 DIST        := dist
+RPMBUILD    ?= rpmbuild
 
 # system paths (freedesktop / XDG)
 BINDIR      := $(PREFIX)/bin
@@ -33,7 +34,7 @@ LIBDIR      := $(PREFIX)/lib/$(APP)
 USER_PREFIX := $(HOME)/.local
 
 .PHONY: all help venv run install install-user uninstall test test-all lint format \
-        build-deb appimage clean distclean deps check
+        build-deb build-rpm appimage clean distclean deps check
 
 all: run
 
@@ -43,7 +44,7 @@ help:
 	@echo "  sudo make install  install to $(PREFIX)/..."
 	@echo "  make install-user  install to $(USER_PREFIX)/..."
 	@echo "  sudo make uninstall remove installed files"
-	@echo "  make test | lint | format | check | build-deb | appimage | clean"
+	@echo "  make test | lint | format | check | build-deb | build-rpm | appimage"
 	@echo "  make test-all      pytest + MPRIS round-trip (private session bus)"
 
 # --- venv + run -----------------------------------------------------------
@@ -158,6 +159,10 @@ check: lint test
 
 build-deb:
 	bash packaging/debian/build-deb.sh
+
+# native RPM for Fedora / RHEL / openSUSE: needs rpmbuild
+build-rpm:
+	RPMBUILD="$(RPMBUILD)" bash scripts/build-rpm.sh
 
 appimage:
 	bash scripts/build-appimage.sh

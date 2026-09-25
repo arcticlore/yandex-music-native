@@ -10,7 +10,9 @@ Run: python -m pytest -q tests/test_packaging.py
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -21,8 +23,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 LEGACY = "yamusic"
-SCANNED_SUFFIXES = (".py", ".toml", ".txt", ".sh", ".service", ".desktop", ".xml")
+SCANNED_SUFFIXES = (".py", ".toml", ".txt", ".sh", ".spec", ".service", ".desktop", ".xml")
 SKIP_DIRS = {".git", ".venv", "dist", "build", "__pycache__", ".pytest_cache", ".ruff_cache"}
+SPEC = "packaging/rpm/yandex-music-native.spec"
+RPM_SCRIPT = "scripts/build-rpm.sh"
 
 
 def tracked_files() -> list[Path]:
@@ -131,10 +135,14 @@ def test_urls_point_at_the_current_repository(pyproject: dict) -> None:
 def test_metainfo_id_matches_installed_file_name() -> None:
     identifier = re.search(r"<id>([^<]+)</id>", text("packaging/yandex-music-native.metainfo.xml")).group(1)
     assert identifier == "org.arcticlore.YandexMusicNative"
-    assert f"{identifier}.metainfo.xml" in text("Makefile")
-    assert f"{identifier}.metainfo.xml" in text("packaging/debian/build-deb.sh")
-    assert f"{identifier}.metainfo.xml" in text("scripts/build-appimage.sh")
-    assert f"{identifier}.metainfo.xml" in text("PKGBUILD")
+    for script in (
+        "Makefile",
+        "packaging/debian/build-deb.sh",
+        "scripts/build-appimage.sh",
+        "PKGBUILD",
+        SPEC,
+    ):
+        assert f"{identifier}.metainfo.xml" in text(script), script
 
 
 def test_dbus_service_name_and_exec() -> None:
@@ -157,6 +165,9 @@ def test_system_launcher_targets_the_new_stack() -> None:
     assert "main.py" in launcher
     assert "ui.app" in launcher
     assert "PYTHONPATH" in launcher
+    # deb/AUR install into <prefix>/lib, the RPM keeps a noarch tree in share
+    assert 'LIBRARY="${PREFIX}/lib/${NAME}"' in launcher
+    assert 'SHARED_LIBRARY="${PREFIX}/share/${NAME}"' in launcher
 
 
 def makefile_variables() -> dict[str, str]:
@@ -204,3 +215,112 @@ def test_tests_only_use_the_new_stack() -> None:
         assert re.search(r"^\s*(?:from|import)\s+.*" + LEGACY, source, re.MULTILINE) is None, path.name
     assert not (ROOT / "tests" / "audio_pipeline.py").exists()
     assert not (ROOT / "tests" / "smoke.py").exists()
+
+
+# -- native RPM (Fedora / RHEL / openSUSE) ------------------------------------
+
+
+@pytest.fixture(scope="module")
+def spec() -> str:
+    return text(SPEC)
+
+
+def test_rpm_spec_is_packaged_and_versioned(spec: str, pyproject: dict) -> None:
+    assert (ROOT / SPEC).is_file()
+    assert "Name:           yandex-music-native" in spec
+    assert f"Version:        {pyproject['project']['version']}" in spec
+    assert "License:        MIT" in spec
+    assert "URL:            https://github.com/arcticlore/yandex-music-native" in spec
+    assert "BuildArch:      noarch" in spec, "the application is pure Python"
+    assert "Release:" in spec and "%{?dist}" in spec
+    assert "%changelog" in spec
+
+
+def test_rpm_requires_the_runtime_dependencies(spec: str) -> None:
+    required = re.findall(r"^Requires:\s+(.+)$", spec, re.MULTILINE)
+    for package in ("python3-pyside6", "python3-numpy", "python3-requests", "pulseaudio-utils"):
+        assert any(package in line for line in required), f"{package} is not required"
+    assert any("python3 >=" in line for line in required), "the interpreter floor is not required"
+    libmpv = [line for line in required if "mpv-libs" in line]
+    assert libmpv, "libmpv is not required"
+    assert " or " in libmpv[0] and "libmpv" in libmpv[0], "libmpv must resolve on Fedora and openSUSE"
+    # nothing in the core/ui stack may be a hard build requirement: it is not compiled
+    for line in re.findall(r"^BuildRequires:\s+(.+)$", spec, re.MULTILINE):
+        assert "python3" in line, f"unexpected build dependency: {line}"
+    assert "gcc" not in spec and "cmake" not in spec and "make" not in spec
+
+
+def test_rpm_sections_install_the_freedesktop_layout(spec: str) -> None:
+    for section in ("%prep", "%install", "%files", "%check"):
+        assert f"\n{section}" in spec, f"{section} is missing"
+    assert "%autosetup -n %{name}-%{version}" in spec
+    for path in (
+        "%{buildroot}%{_datadir}/%{name}",
+        "%{buildroot}%{_bindir}",
+        "%{_datadir}/applications/%{name}.desktop",
+        "%{_datadir}/icons/hicolor/scalable/apps/%{name}.svg",
+        "%{buildroot}%{_datadir}/dbus-1/services",
+        "%{buildroot}%{_datadir}/metainfo",
+    ):
+        assert path in spec, f"{path} is not installed"
+    for path in ("%{_bindir}/%{name}", "%{_datadir}/%{name}/main.py", "%license LICENSE", "%doc README.md"):
+        assert path in spec, f"{path} is not packaged"
+    # a noarch package must not write into /usr/lib
+    assert "%{buildroot}%{_libdir}" not in spec
+    assert "%{python3_sitelib}" not in spec
+    # the D-Bus activation has to point at the installed launcher
+    assert "s|/usr/local/bin/%{name}|%{_bindir}/%{name}|" in spec
+    assert "__pycache__" in spec, "byte-code caches must be pruned"
+
+
+def test_rpm_sources_exist_in_the_repository(spec: str) -> None:
+    referenced = set(re.findall(r"(?:src|packaging)/[A-Za-z0-9_./-]+", spec))
+    assert referenced
+    missing = sorted(path for path in referenced if not list(ROOT.glob(path)))
+    assert missing == [], f"the spec references missing sources: {missing}"
+    assert "/home/" not in spec and "samsa" not in spec
+
+
+def test_rpm_build_script_is_runnable() -> None:
+    script = ROOT / RPM_SCRIPT
+    assert script.is_file()
+    assert os.access(script, os.X_OK), "scripts/build-rpm.sh is not executable"
+    body = script.read_text("utf-8")
+    assert body.startswith("#!/usr/bin/env bash")
+    assert "rpmbuild" in body
+    assert "packaging/rpm" in body, "the script must find the spec"
+    assert '"${ROOT}/src"' in body and '"${ROOT}/packaging"' in body, "the tree is staged as it is"
+    assert "__pycache__" in body, "the source tarball must not carry byte-code caches"
+    result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "build-rpm" in resolve_makefile()
+
+
+def workflow_job(name: str) -> str:
+    body = text(".github/workflows/release.yml")
+    match = re.search(rf"^  {re.escape(name)}:\n.*?(?=^  [a-z_-]+:\n|\Z)", body, re.MULTILINE | re.DOTALL)
+    assert match, f"release.yml has no {name} job"
+    return match.group(0)
+
+
+def test_rpm_is_built_and_attached_by_the_release_workflow() -> None:
+    rpm = workflow_job("rpm")
+    assert "needs: test" in rpm
+    assert re.search(r"^\s+container: fedora", rpm, re.MULTILINE), "rpmbuild needs an RPM distribution"
+    assert "rpm-build" in rpm, "the container must install the rpm tooling"
+    assert RPM_SCRIPT in rpm
+    assert re.search(r"name: rpm-package\s+path: dist/\*\.rpm", rpm), rpm
+    release = workflow_job("release")
+    needs = re.search(r"needs: \[([^\]]+)\]", release)
+    assert needs and "rpm" in [item.strip() for item in needs.group(1).split(",")]
+    assert "*.rpm" in release, "the RPM never reaches the GitHub Release"
+
+
+def test_readme_documents_the_rpm_channel() -> None:
+    for readme in ("README.md", "README.en.md"):
+        body = text(readme)
+        assert "make build-rpm" in body, readme
+        assert "dnf install ./yandex-music-native" in body, readme
+        assert "zypper install" in body, readme
+    assert "packaging/rpm/yandex-music-native.spec" in text("README.md")
+    assert "packaging/rpm/yandex-music-native.spec" in text("README.en.md")

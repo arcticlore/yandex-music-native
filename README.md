@@ -104,11 +104,32 @@ sudo make uninstall
 |---|---|
 | **AppImage** | `make appimage` → `dist/yandex-music-native-*.AppImage` |
 | **.deb** | `make build-deb` → `dist/yandex-music-native_*_amd64.deb` |
+| **.rpm** | `make build-rpm` → `dist/yandex-music-native-*.noarch.rpm` |
 | **PKGBUILD (AUR)** | `makepkg -si` из корня репозитория |
 | **pip** | `pip install .` |
 
-CI: `.github/workflows/release.yml` на тег `v*` собирает `.deb`, source
-`.tar.gz` и `.AppImage` и публикует GitHub Release.
+### RPM (Fedora / RHEL / openSUSE)
+
+Спека — `packaging/rpm/yandex-music-native.spec` (`noarch`, чистый Python),
+сборка из текущего дерева:
+
+```bash
+sudo dnf install rpm-build
+make build-rpm            # + --source-only для SRPM, --with-source для обоих
+sudo dnf install ./yandex-music-native-1.0.0-1.*.noarch.rpm   # из каталога с .rpm
+# openSUSE:
+sudo zypper install ./yandex-music-native-1.0.0-1.*.noarch.rpm
+```
+
+Пакет кладёт стек в `/usr/share/yandex-music-native/`, лаунчер — в
+`/usr/bin/yandex-music-native`, плюс `.desktop`, иконку, D-Bus-сервис и
+AppStream-_metainfo. Зависимости: `python3-pyside6`, `python3-numpy`,
+`python3-requests`, `python3-keyring`, `pulseaudio-utils` и libmpv
+(`mpv-libs` на Fedora/RHEL, `libmpv2` на openSUSE); `yandex-music` и
+`python-mpv` доустанавливаются через pip в `%post`, если их нет в системе.
+
+CI: `.github/workflows/release.yml` на тег `v*` собирает `.deb`, `.rpm`,
+source `.tar.gz` и `.AppImage` и публикует GitHub Release.
 
 ## Тесты
 
@@ -142,15 +163,17 @@ PCM→FFT→mpv пайплайн, ~450 внутренних проверок). M
 ```
 .
 ├── .github/workflows/ci.yml       # ruff + pytest на push/PR (Ubuntu, 3.11/3.12)
-├── .github/workflows/release.yml  # deb + tar.gz + AppImage → Release (тег v*)
+├── .github/workflows/release.yml  # deb + rpm + tar.gz + AppImage → Release (тег v*)
 ├── packaging/
 │   ├── yandex-music-native.desktop # XDG Desktop Entry
 │   ├── yandex-music-native.metainfo.xml # AppStream (id org.arcticlore.*)
-│   ├── yandex-music-native.sh      # системный лаунчер (общий для deb/AUR)
+│   ├── yandex-music-native.sh      # системный лаунчер (общий для deb/rpm/AUR)
 │   ├── dbus/yandex-music-native.service
 │   ├── icons/hicolor/...
-│   └── debian/build-deb.sh
+│   ├── debian/build-deb.sh
+│   └── rpm/yandex-music-native.spec # Fedora / RHEL / openSUSE
 ├── scripts/build-appimage.sh
+├── scripts/build-rpm.sh
 ├── src/
 │   ├── main.py                     # точка входа → ui.app:main
 │   ├── core/                       # auth, audio_engine, config_manager,

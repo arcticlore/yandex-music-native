@@ -58,6 +58,21 @@ jobs:
           name: deb-package
           path: dist/*.deb
 
+  rpm:
+    needs: test
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Build deps
+        run: dnf -y install rpm-build git tar gzip findutils
+      - uses: actions/checkout@v4
+      - name: Build RPM
+        run: bash scripts/build-rpm.sh --with-source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: dist/*.rpm
+
   tarball:
     needs: test
     runs-on: ubuntu-latest
@@ -116,7 +131,7 @@ jobs:
           path: dist/*.AppImage
 
   release:
-    needs: [deb, tarball, appimage]
+    needs: [deb, rpm, tarball, appimage]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -126,8 +141,8 @@ jobs:
       - name: Collect assets
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.deb' -o -name '*.tar.gz' -o -name '*.AppImage' \) \
-            -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' \
+            -o -name '*.AppImage' \) -exec cp {} release/ \;
           ls -la release/
       - uses: softprops/action-gh-release@v2
         with:

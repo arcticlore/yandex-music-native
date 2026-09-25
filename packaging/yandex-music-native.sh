@@ -2,8 +2,9 @@
 # System launcher for Yandex Music Native (freedesktop install).
 #
 # One launcher for every packaging channel: it prefers the sources copied into
-# <prefix>/lib/yandex-music-native, then an installed Python package, then a
-# source checkout next to this script.
+# <prefix>/lib/yandex-music-native (deb, AUR), then <prefix>/share/yandex-music-native
+# (RPM), then an installed Python package, then a source checkout next to this
+# script.
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -11,11 +12,23 @@ BIN_DIR="$(dirname "${SELF}")"
 PREFIX="$(dirname "${BIN_DIR}")"
 NAME="yandex-music-native"
 LIBRARY="${PREFIX}/lib/${NAME}"
+SHARED_LIBRARY="${PREFIX}/share/${NAME}"
+
+run_sources() {
+  local library="$1"
+  shift
+  export PYTHONPATH="${library}${PYTHONPATH:+:${PYTHONPATH}}"
+  exec python3 "${library}/main.py" "$@"
+}
 
 # Sources installed by "make install" / build-deb / PKGBUILD.
 if [[ -f "${LIBRARY}/main.py" ]]; then
-  export PYTHONPATH="${LIBRARY}${PYTHONPATH:+:${PYTHONPATH}}"
-  exec python3 "${LIBRARY}/main.py" "$@"
+  run_sources "${LIBRARY}" "$@"
+fi
+
+# Sources installed by the RPM (a noarch package keeps them out of /usr/lib).
+if [[ -f "${SHARED_LIBRARY}/main.py" ]]; then
+  run_sources "${SHARED_LIBRARY}" "$@"
 fi
 
 # Package installed with "pip install ." → console entry point.
@@ -32,6 +45,6 @@ for _ in $(seq 1 6); do
   dir="$(dirname "${dir}")"
 done
 
-echo "${NAME}: neither ${LIBRARY} nor an installed package was found" >&2
+echo "${NAME}: neither ${LIBRARY} nor ${SHARED_LIBRARY} nor an installed package was found" >&2
 echo "${NAME}: run 'make install', 'pip install .' or use a source checkout" >&2
 exit 1
