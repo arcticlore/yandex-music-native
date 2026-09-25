@@ -1,9 +1,10 @@
 """Bootstrap of the new Qt shell.
 
-Order matters: the login dialog runs *before* the main window exists, so the
-service is created with a token that is already known to be valid. The desktop
-integrations (MPRIS, notifications, tray) are attached after the window and
-kept in module-level slots so Qt does not garbage-collect them.
+Two entry paths exist. Without a stored token the modal :class:`AuthDialog` runs
+*before* the main window exists, so the service is created with a token that is
+already known to be valid. With a stored token the window is shown immediately
+and the session is restored in a background thread: no popup, and a network
+failure keeps the token so the next launch retries on its own.
 """
 
 from __future__ import annotations
@@ -13,9 +14,11 @@ import os
 import sys
 from typing import Any
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QProcess
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from core.audio_engine import AudioEngine
+from core.auth import AuthService
 from core.config_manager import ConfigManager
 from core.mpris import MprisService
 from core.notifications import NotificationService
@@ -31,6 +34,7 @@ log = logging.getLogger(__name__)
 APP_NAME = "Яндекс Музыка"
 APP_ID = "yandex-music-native"
 ORG_NAME = "yandex-music-native"
+RESTART_MESSAGE = "Сессия обновлена, приложение перезапускается…"
 
 
 def setup_logging() -> None:
@@ -53,6 +57,13 @@ def authenticate(config: ConfigManager, app: QApplication) -> dict | None:
     return dict(profile)
 
 
+def show_profile(window: MainWindow, profile: dict[str, Any]) -> None:
+    window.set_profile(
+        str(profile.get("login") or profile.get("display_name") or ""),
+        "Подписка Plus" if profile.get("has_plus") else "",
+    )
+
+
 def build_window(
     config: ConfigManager,
     app: QApplication,
@@ -71,6 +82,54 @@ def build_window(
     )
     window = MainWindow(playback, config)
     return window, playback, {"service": playback.service, "engine": playback.engine}
+
+
+def restore_session_in_background(
+    config: ConfigManager,
+    app: QApplication,
+    window: MainWindow,
+) -> AuthService:
+    """Validate the stored token while the window is already on screen.
+
+    The profile fills in as soon as the answer arrives; a transport failure only
+    shows a status message with a retry button, because the token is still
+    valid. A rejected token is gone from the config, so the user is offered a
+    fresh login and the app restarts with the new session.
+    """
+    auth = AuthService(config)
+    retry = QPushButton("Повторить")
+    retry.setVisible(False)
+    window.statusBar().addPermanentWidget(retry)
+    retry.clicked.connect(lambda: auth.restore_session())
+    auth.browser_login_started.connect(lambda: retry.setVisible(False))
+    auth.status_changed.connect(lambda text: window.statusBar().showMessage(text, 6000))
+    auth.plus_warning.connect(lambda text: window.statusBar().showMessage(text, 8000))
+    auth.auth_success.connect(lambda profile: show_profile(window, profile))
+
+    def on_error(message: str) -> None:
+        window.statusBar().showMessage(message, 0)
+        if config.get_token():
+            retry.setVisible(True)
+            return
+        answer = QMessageBox.question(
+            window,
+            APP_NAME,
+            f"{message}\n\nВойти заново?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            app.quit()
+            return
+        if authenticate(config, app) is None:
+            app.quit()
+            return
+        log.info(RESTART_MESSAGE)
+        QProcess.startDetached(sys.executable, [sys.argv[0]])
+        app.quit()
+
+    auth.auth_error.connect(on_error)
+    auth.restore_session()
+    return auth
 
 
 def attach_integrations(
@@ -111,22 +170,29 @@ def main(argv: list[str] | None = None) -> int:
     apply_theme(app)
 
     config = ConfigManager()
-    profile = authenticate(config, app)
-    if profile is None:
-        return 0
-
-    try:
-        window, playback, _held = build_window(config, app)
-    except RuntimeError as exc:
-        log.error("%s", exc)
-        QMessageBox.critical(None, APP_NAME, str(exc))
-        return 1
+    stored = config.get_token()
+    auth: AuthService | None = None
+    if stored:
+        try:
+            window, playback, _held = build_window(config, app)
+        except RuntimeError as exc:
+            log.error("%s", exc)
+            QMessageBox.critical(None, APP_NAME, str(exc))
+            return 1
+        auth = restore_session_in_background(config, app, window)
+    else:
+        profile = authenticate(config, app)
+        if profile is None:
+            return 0
+        try:
+            window, playback, _held = build_window(config, app)
+        except RuntimeError as exc:
+            log.error("%s", exc)
+            QMessageBox.critical(None, APP_NAME, str(exc))
+            return 1
+        show_profile(window, profile)
 
     playback.set_volume(config.get_volume())
-    window.set_profile(
-        str(profile.get("login") or profile.get("display_name") or ""),
-        "Подписка Plus" if profile.get("has_plus") else "",
-    )
     window.restore_page()
     window.show()
     held = attach_integrations(window, playback, config, app)
@@ -134,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     app._yml_window = window  # noqa: SLF001
     app._yml_playback = playback  # noqa: SLF001
     app._yml_config = config  # noqa: SLF001
+    app._yml_auth = auth  # noqa: SLF001
     return app.exec()
 
 

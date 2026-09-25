@@ -12,8 +12,10 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 from PySide6.QtCore import Qt
@@ -552,6 +554,65 @@ def test_bootstrap_reports_missing_token(app, config: ConfigManager) -> None:
     check("no token stored", config.get_token() is None)
     with pytest.raises(RuntimeError, match="токена"):
         build_window(config, app)
+
+
+def test_stored_token_opens_window_without_dialog(
+    app,
+    config: ConfigManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ui.app as app_module
+    from core.auth import AuthService
+    from PySide6.QtWidgets import QPushButton
+
+    rig = Rig(app)
+    try:
+        rig.login()
+        apply_theme(app)
+        config.set_token("stored-token-000000000")
+        check("token stored for the test", config.get_token() == "stored-token-000000000")
+        check("keyring untouched by tests", config.storage_backend == "file", config.storage_backend)
+        window_shown = False
+        window, _playback, _held = build_window(
+            config,
+            app,
+            controller=rig.controller,
+            service=rig.service,
+            engine=rig.engine,
+        )
+        dialog_calls: list[object] = []
+
+        def forbidden_dialog(*args: object, **kwargs: object) -> object:
+            dialog_calls.append(args)
+            raise AssertionError("AuthDialog must not open when a token is stored")
+
+        monkeypatch.setattr(app_module, "AuthDialog", forbidden_dialog)
+        with mock.patch("yandex_music.Client", side_effect=TimeoutError("timed out")):
+            auth = app_module.restore_session_in_background(config, app, window)
+            deadline = time.time() + 5
+            while time.time() < deadline and auth.is_busy:
+                app.processEvents()
+                time.sleep(0.02)
+            app.processEvents()
+        check("background restore used", isinstance(auth, AuthService))
+        check("no modal dialog", dialog_calls == [], str(dialog_calls))
+        check("token kept after timeout", config.get_token() == "stored-token-000000000")
+        retry = [
+            widget for widget in window.statusBar().findChildren(QPushButton) if widget.text() == "Повторить"
+        ]
+        check("retry button present", len(retry) == 1, str(retry))
+        window.show()
+        app.processEvents()
+        check("retry button shown", retry[0].isVisible())
+        window_shown = True
+        check("error message in status bar", "связ" in window.statusBar().currentMessage().lower())
+        check("not authenticated", auth.is_authenticated is False)
+        check("window usable", window.isEnabled())
+        if window_shown:
+            window.close()
+        auth.shutdown()
+    finally:
+        rig.close()
 
 
 # -- track list -------------------------------------------------------------

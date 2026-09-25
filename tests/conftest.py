@@ -77,6 +77,32 @@ def qt_sweep(app) -> Iterator[None]:
     app.processEvents()
 
 
+@pytest.fixture(autouse=True)
+def isolated_keyring(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Make the system keyring unavailable so no test can touch real secrets.
+
+    ``ConfigManager`` falls back to ``config.json`` (mode 0600) whenever no
+    usable backend exists, which is exactly the path the tests must exercise.
+    A test that needs the keyring injects its own module (see ``auth_test``).
+    """
+
+    def refuse(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("keyring is disabled in tests")
+
+    try:
+        import keyring
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    from keyring.backends import fail as keyring_fail
+
+    monkeypatch.setattr(keyring, "get_keyring", lambda: keyring_fail.Keyring())
+    monkeypatch.setattr(keyring, "get_password", refuse)
+    monkeypatch.setattr(keyring, "set_password", refuse)
+    monkeypatch.setattr(keyring, "delete_password", refuse)
+    yield
+
+
 @pytest.fixture()
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point XDG config/cache at a throwaway directory for one test."""

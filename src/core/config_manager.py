@@ -1,9 +1,11 @@
 """Configuration and credential storage for yandex-music-linux.
 
 Tokens are kept in the system keyring (Secret Service / KWallet) through the
-``keyring`` package. When no usable keyring backend exists the token is stored
-inside ``~/.config/yandex-music-native/config.json`` with mode ``0600``; the
-owning directory is created with mode ``0700``.
+``keyring`` package and are always mirrored into
+``~/.config/yandex-music-native/config.json`` with mode ``0600`` as a fallback
+copy; the owning directory is created with mode ``0700``. The copy is what a
+launch reads when the keyring is unavailable or empty, so a locked keyring
+never means a new login.
 """
 
 from __future__ import annotations
@@ -307,16 +309,19 @@ class ConfigManager:
             return self._read_token_file()
 
     def set_token(self, token: str) -> str:
+        """Store the token in the keyring and mirror it into ``config.json``.
+
+        The file copy is the safety net: a locked keyring (no Secret Service
+        session, locked KWallet, broken backend) must not cost the user a login,
+        and the fallback is what a later launch reads when the keyring is empty.
+        """
         value = str(token).strip()
         if not value:
             raise ValueError("empty token")
         with self._lock:
-            if self._keyring_set(value):
-                self._drop_file_token()
-                self._write()
-                return "keyring"
+            in_keyring = self._keyring_set(value)
             self._write_token_file(value)
-            return "file"
+            return "keyring" if in_keyring else "file"
 
     def delete_token(self) -> None:
         with self._lock:

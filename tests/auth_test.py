@@ -111,9 +111,10 @@ def test_config_keyring(tmp: Path) -> None:
         check("keyring used", backend == "keyring", backend)
         check("keyring get", cfg.get_token() == "keyring-token-abcdefghij")
         check(
-            "token not in file",
-            "access_token" not in json.loads(cfg.config_path.read_text()),
+            "token mirrored into config file",
+            json.loads(cfg.config_path.read_text()).get("access_token") == "keyring-token-abcdefghij",
         )
+        check("mirrored token mode 0600", cfg.file_mode() == 0o600, oct(cfg.file_mode() or 0))
         check(
             "keyring contains token",
             fake.store[("yandex-music-native", "oauth-token")] == "keyring-token-abcdefghij",
@@ -121,9 +122,16 @@ def test_config_keyring(tmp: Path) -> None:
         cfg.set_volume(7)
         check("settings with keyring", cfg.get_volume() == 7)
         check("keyring token after setting", cfg.get_token() == "keyring-token-abcdefghij")
+        check(
+            "mirror survives settings write",
+            json.loads(cfg.config_path.read_text()).get("access_token") == "keyring-token-abcdefghij",
+        )
+        fake.store.clear()
+        check("file token used when keyring empty", cfg.get_token() == "keyring-token-abcdefghij")
         cfg.delete_token()
         check("keyring deleted", cfg.get_token() is None)
         check("keyring store empty", not fake.store)
+        check("mirror removed on delete", "access_token" not in json.loads(cfg.config_path.read_text()))
 
 
 def test_config_corrupted_json() -> None:
@@ -276,6 +284,100 @@ def test_login_signals(app: QCoreApplication, tmp: Path) -> None:
             time.sleep(0.02)
     check("auth_error emitted", len(errors) == 1, str(errors))
     check("error message russian", "Ошибка" in errors[0] or "токен" in errors[0], errors[0])
+    svc.shutdown()
+
+
+def _restore(
+    app: QCoreApplication, exc: BaseException
+) -> tuple[ConfigManager, list[str], list[str], list[dict]]:
+    """Run :meth:`AuthService.restore_session` against a failing client."""
+    cfg = ConfigManager("test-app-restore")
+    cfg.set_token("stored-token-000000000")
+    svc = AuthService(cfg)
+    errors: list[str] = []
+    statuses: list[str] = []
+    received: list[dict] = []
+    svc.auth_error.connect(errors.append)
+    svc.status_changed.connect(statuses.append)
+    svc.auth_success.connect(received.append)
+    with mock.patch("yandex_music.Client", side_effect=exc):
+        check("restore submitted", svc.restore_session() is True)
+        deadline = time.time() + 5
+        while time.time() < deadline and not errors:
+            app.processEvents()
+            time.sleep(0.02)
+    app.processEvents()
+    svc.shutdown()
+    return cfg, errors, statuses, received
+
+
+def test_restore_keeps_token_on_network_error(app: QCoreApplication) -> None:
+    from yandex_music.exceptions import NetworkError
+    import requests
+
+    cases = {
+        "timeout": TimeoutError("timed out"),
+        "requests timeout": requests.exceptions.ReadTimeout("read timed out"),
+        "connection refused": requests.exceptions.ConnectionError("connection refused"),
+        "ssl": requests.exceptions.SSLError("handshake failure"),
+        "dns": OSError("nodename nor servname provided"),
+        "server 502": NetworkError("Bad Gateway"),
+    }
+    for name, exc in cases.items():
+        cfg, errors, statuses, received = _restore(app, exc)
+        check(f"{name}: token kept", cfg.get_token() == "stored-token-000000000", name)
+        check(f"{name}: auth_error emitted", len(errors) == 1, f"{name} {errors}")
+        check(f"{name}: no auth_success", received == [], f"{name} {received}")
+        check(
+            f"{name}: network status",
+            statuses[-1] == "Нет подключения к сети",
+            f"{name} {statuses}",
+        )
+        check(f"{name}: classified as network", AuthService.is_network_error(exc) is True, name)
+        check(f"{name}: not a rejection", AuthService.is_token_rejected(exc) is False, name)
+
+
+def test_restore_deletes_token_on_unauthorized(app: QCoreApplication) -> None:
+    from yandex_music.exceptions import UnauthorizedError
+
+    exc = UnauthorizedError("Unauthorized (401)")
+    cfg, errors, statuses, received = _restore(app, exc)
+    check("401: token deleted", cfg.get_token() is None)
+    check("401: no mirror left", "access_token" not in json.loads(cfg.config_path.read_text()))
+    check("401: auth_error emitted", len(errors) == 1, str(errors))
+    check("401: session expired status", statuses[-1] == "Сохранённая сессия истекла", str(statuses))
+    check("401: no auth_success", received == [])
+    check("401: classified as rejection", AuthService.is_token_rejected(exc) is True)
+    check("401: not a network error", AuthService.is_network_error(exc) is False)
+
+    forbidden = UnauthorizedError("Forbidden (403): no rights")
+    cfg2, _errors2, _statuses2, _received2 = _restore(app, forbidden)
+    check("403: token kept", cfg2.get_token() == "stored-token-000000000")
+    check("403: not a rejection", AuthService.is_token_rejected(forbidden) is False)
+
+    text = RuntimeError("Invalid token supplied")
+    cfg3, _errors3, _statuses3, _received3 = _restore(app, text)
+    check("invalid token text: token deleted", cfg3.get_token() is None)
+    check("invalid token text: rejection", AuthService.is_token_rejected(text) is True)
+
+
+def test_restore_succeeds_with_stored_token(app: QCoreApplication) -> None:
+    cfg = ConfigManager("test-app-restore-ok")
+    cfg.set_token("stored-token-000000000")
+    svc = AuthService(cfg)
+    received: list[dict] = []
+    svc.auth_success.connect(received.append)
+    with mock.patch("yandex_music.Client", return_value=_fake_client("stored-token-000000000")):
+        check("restore submitted", svc.restore_session() is True)
+        deadline = time.time() + 5
+        while time.time() < deadline and not received:
+            app.processEvents()
+            time.sleep(0.02)
+    app.processEvents()
+    check("restore success emitted", len(received) == 1)
+    check("restore token kept", cfg.get_token() == "stored-token-000000000")
+    check("restore authenticated", svc.is_authenticated is True)
+    check("restore not busy", svc.is_busy is False)
     svc.shutdown()
 
 

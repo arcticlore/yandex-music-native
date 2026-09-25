@@ -53,6 +53,29 @@ BROWSER_TIMEOUT_MS = 300_000
 CLIENT_ID_ENV = "YML_OAUTH_CLIENT_ID"
 DEFAULT_DEVICE_NAME = "yandex-music-linux"
 
+NETWORK_ERROR_MARKERS = (
+    "timeout",
+    "timed out",
+    "connection",
+    "network",
+    "ssl",
+    "dns",
+    "unreachable",
+    "bad gateway",
+    "server error",
+)
+REJECTED_TOKEN_MARKERS = (
+    "unauthorized",
+    "401",
+    "invalid token",
+    "invalid-token",
+    "incorrect token",
+    "token expired",
+    "expired token",
+    "token is invalid",
+)
+FORBIDDEN_MARKERS = ("forbidden", "403", "no rights", "нет прав")
+
 _PAGE = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
 <title>{title}</title>
@@ -657,6 +680,34 @@ class AuthService(QObject):
         return None
 
     @staticmethod
+    def is_network_error(exc: BaseException) -> bool:
+        """True for transport failures, which must never cost the user a token."""
+        from yandex_music.exceptions import NetworkError, TimedOutError
+
+        if isinstance(exc, (TimeoutError, ConnectionError, OSError, NetworkError, TimedOutError)):
+            return True
+        lowered = f"{type(exc).__name__} {exc}".lower()
+        return any(marker in lowered for marker in NETWORK_ERROR_MARKERS)
+
+    @classmethod
+    def is_token_rejected(cls, exc: BaseException) -> bool:
+        """True only when the server refused the token itself (HTTP 401).
+
+        ``yandex_music`` raises :class:`UnauthorizedError` for both 401 and 403;
+        403 means the account simply lacks the rights, so the token is kept.
+        """
+        from yandex_music.exceptions import UnauthorizedError
+
+        lowered = f"{type(exc).__name__} {exc}".lower()
+        if any(marker in lowered for marker in FORBIDDEN_MARKERS):
+            return False
+        if isinstance(exc, UnauthorizedError):
+            return True
+        if cls.is_network_error(exc):
+            return False
+        return any(marker in lowered for marker in REJECTED_TOKEN_MARKERS)
+
+    @staticmethod
     def _readable_error(exc: Exception) -> str:
         name = type(exc).__name__
         text = str(exc).strip()
@@ -691,15 +742,28 @@ class AuthService(QObject):
         return True
 
     def _restore_worker(self, token: str) -> None:
+        """Validate a stored token; only a real rejection throws it away.
+
+        Transport failures (timeout, DNS, TLS, 5xx) say nothing about the
+        token, so it is kept and the next launch restores the session without
+        a new login.
+        """
         try:
             user_data = self.validate_token(token)
         except Exception as exc:
             self._busy = False
             self._token = None
             self._user_data = {}
-            self._config.delete_token()
-            self._set_status("Сохранённая сессия истекла")
-            log.info("stored token rejected: %s", exc)
+            if self.is_token_rejected(exc):
+                self._config.delete_token()
+                self._set_status("Сохранённая сессия истекла")
+                log.info("stored token rejected: %s", exc)
+            elif self.is_network_error(exc):
+                self._set_status("Нет подключения к сети")
+                log.debug("session restore failed, token kept: %s", exc)
+            else:
+                self._set_status("Не удалось проверить сохранённую сессию")
+                log.debug("session restore failed, token kept: %s", exc)
             self.auth_error.emit(self._readable_error(exc))
             return
         self._token = token
