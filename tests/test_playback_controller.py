@@ -37,9 +37,9 @@ from yandex_music import (  # noqa: E402
     Track,
 )
 
+from core.network import YANDEX_USER_AGENT, network_session  # noqa: E402
 from core.playback_controller import (  # noqa: E402
     COVER_TIMEOUTS,
-    COVER_USER_AGENT,
     CoverDownloadError,
     PlaybackController,
     PlaybackState,
@@ -1194,7 +1194,11 @@ def test_cover_downloader(monkeypatch, tmp_path: Path) -> None:
 
 def test_cover_session_is_reused() -> None:
     check("cover session pooled", _cover_session() is _cover_session())
-    check("cover session user agent", COVER_USER_AGENT in _cover_session().headers.get("User-Agent", ""))
+    check("cover session is the network session", _cover_session() is network_session())
+    check(
+        "cover session user agent",
+        _cover_session().headers.get("User-Agent", "") == YANDEX_USER_AGENT,
+    )
 
 
 def test_stale_stream_and_link_cache(app: QApplication) -> None:

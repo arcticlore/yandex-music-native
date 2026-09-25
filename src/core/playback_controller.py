@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import threading
 import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -26,6 +25,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from core import station
 from core.audio_engine import STATE_PAUSED, STATE_PLAYING, STATE_STOPPED, AudioEngine
+from core.network import COVER_TIMEOUTS
 from core.yandex_service import (
     DEFAULT_COVER_SIZE,
     DEFAULT_DIVERSITY,
@@ -41,18 +41,12 @@ from core.yandex_service import (
 log = logging.getLogger(__name__)
 
 POSITION_INTERVAL_MS = 200
-COVER_CONNECT_TIMEOUT_S = 5.0
-COVER_READ_TIMEOUT_S = 10.0
-COVER_TIMEOUTS = (COVER_CONNECT_TIMEOUT_S, COVER_READ_TIMEOUT_S)
 COVER_MAX_BYTES = 8 * 1024 * 1024
 COVER_CHUNK_BYTES = 64 * 1024
-COVER_USER_AGENT = "yandex-music-native/0.1"
 COVER_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 APP_ICON_NAME = "yandex-music-native.svg"
 
 CoverDownloader = Callable[[str, Path], None]
-
-_sessions = threading.local()
 
 
 class CoverDownloadError(RuntimeError):
@@ -60,13 +54,10 @@ class CoverDownloadError(RuntimeError):
 
 
 def _cover_session() -> requests.Session:
-    """One pooled session per worker thread: connections are reused, no shared state."""
-    session = getattr(_sessions, "session", None)
-    if session is None:
-        session = requests.Session()
-        session.headers.update({"User-Agent": COVER_USER_AGENT})
-        _sessions.session = session
-    return session
+    """The shared network session, so covers reuse the warm connection pool."""
+    from core.network import network_session
+
+    return network_session()
 
 
 def cover_cache_dir() -> Path:
@@ -1001,9 +992,7 @@ class PlaybackController(QObject):
 
 __all__ = [
     "COVER_CHUNK_BYTES",
-    "COVER_CONNECT_TIMEOUT_S",
     "COVER_MAX_BYTES",
-    "COVER_READ_TIMEOUT_S",
     "COVER_TIMEOUTS",
     "POSITION_INTERVAL_MS",
     "CoverDownloadError",

@@ -362,11 +362,12 @@ class AuthService(QObject):
         return True
 
     def _device_worker(self, flow_id: int) -> None:
-        from yandex_music import Client
         from yandex_music.exceptions import DeviceAuthError, YandexMusicError
 
+        from core.network import build_client
+
         try:
-            client = Client()
+            client = build_client()
             code = client.request_device_code(
                 device_name=DEFAULT_DEVICE_NAME,
                 client_id=self.client_id(),
@@ -612,9 +613,9 @@ class AuthService(QObject):
         self.browser_login_finished.emit()
 
     def validate_token(self, token: str) -> dict[str, Any]:
-        from yandex_music import Client
+        from core.network import build_client
 
-        client = Client(token)
+        client = build_client(token)
         client.init()
         return self.extract_profile(client)
 

@@ -40,12 +40,14 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 
 from core import station
 from core.auth import AuthService
@@ -56,6 +58,8 @@ log = logging.getLogger(__name__)
 WAVE_STATION = "user:onyourwave"
 FEEDBACK_FROM_PREFIX = "mobile-radio-user"
 
+FEEDBACK_WORKERS = 1
+FEEDBACK_CLOSE_TIMEOUT_S = 1.5
 FEEDBACK_RADIO_STARTED = "radioStarted"
 FEEDBACK_TRACK_STARTED = "trackStarted"
 FEEDBACK_TRACK_PLAYED = "trackFinished"
@@ -148,10 +152,15 @@ ClientFactory = Callable[[str], Any]
 
 
 def default_client_factory(token: str) -> Any:
-    """Create a ``yandex_music.Client`` bound to ``token``."""
-    from yandex_music import Client
+    """Create a ``yandex_music.Client`` bound to ``token``.
 
-    client = Client(token)
+    The client goes through :mod:`core.network`, so it inherits the shared
+    session: one connection pool, IPv4-only resolution and the official client
+    User-Agent.
+    """
+    from core.network import build_client
+
+    client = build_client(token)
     client.device = DEVICE_STRING
     return client
 
@@ -707,6 +716,131 @@ class _Job:
     on_err: Callable[[Exception], None] = field(default=lambda exc: None)
 
 
+@dataclass(frozen=True)
+class Feedback:
+    """One rotor event captured on the GUI thread, sent on a pool thread."""
+
+    station: str
+    event: str
+    origin: str
+    batch_id: str | None
+    track_id: str | None
+    played_seconds: float | None
+    token: str
+
+
+def _report_feedback(bridge: weakref.ReferenceType) -> Callable[[str, str], None]:
+    """Build the pool thread's callback: announce a result on the bridge.
+
+    The bridge is only held weakly, so a pool thread can neither keep the
+    service QObject alive (which would destroy it off the main thread) nor
+    touch Qt after the service is gone.
+    """
+
+    def emit(track_id: str, event: str) -> None:
+        owner = bridge()
+        if owner is None:
+            return
+        try:
+            owner.delivered.emit(track_id, event)
+        except RuntimeError as exc:
+            log.debug("feedback %s not reported: %s", event, exc)
+
+    return emit
+
+
+def _deliver_feedback(
+    factory: ClientFactory,
+    token: str,
+    payload: Feedback,
+    queue: _FeedbackQueue,
+    emit: Callable[[str, str], None] | None,
+) -> None:
+    """Send one event off the caller's thread; the result is only reported.
+
+    This is a module function on purpose: a bound method would keep the
+    ``YandexService`` QObject alive, and CPython would then destroy it on this
+    pool thread, which Qt does not allow.
+    """
+    try:
+        factory(token).rotor_station_feedback(
+            payload.station,
+            payload.event,
+            timestamp=_feedback_timestamp(),
+            from_=payload.origin,
+            batch_id=payload.batch_id,
+            total_played_seconds=payload.played_seconds,
+            track_id=payload.track_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("feedback %s failed: %s", payload.event, exc)
+    else:
+        if emit is not None:
+            emit(payload.track_id or "", payload.event)
+    finally:
+        queue.finished()
+
+
+class _FeedbackQueue:
+    """Rotor feedback on its own thread, outside the serial request queue.
+
+    Kept free of Qt types on purpose: only the service thread may touch the
+    QObject, while this object (and its pool) may outlive it.
+    """
+
+    def __init__(self, workers: int = FEEDBACK_WORKERS) -> None:
+        self._lock = threading.Lock()
+        self._pending = 0
+        self._closed = False
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rotor-feedback")
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._pending > 0
+
+    def submit(
+        self,
+        factory: ClientFactory,
+        token: str,
+        payload: Feedback,
+        emit: Callable[[str, str], None] | None,
+    ) -> bool:
+        """Queue one event; ``False`` means the queue is closed."""
+        with self._lock:
+            if self._closed:
+                return False
+            self._pending += 1
+        try:
+            self._pool.submit(_deliver_feedback, factory, token, payload, self, emit)
+        except RuntimeError as exc:
+            self.finished()
+            log.debug("feedback %s not queued: %s", payload.event, exc)
+            return False
+        return True
+
+    def finished(self) -> None:
+        with self._lock:
+            self._pending = max(0, self._pending - 1)
+
+    def close(self, timeout: float = FEEDBACK_CLOSE_TIMEOUT_S) -> None:
+        """Stop accepting events, then give the last call a bounded moment."""
+        with self._lock:
+            self._closed = True
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.busy:
+                break
+            time.sleep(0.01)
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+class _FeedbackBridge(QObject):
+    """Carries a pool-thread result back to the service thread as a queued call."""
+
+    delivered = Signal(str, str)
+
+
 class _YandexWorker(QThread):
     """Runs queued API jobs on a single thread with one shared client."""
 
@@ -729,6 +863,11 @@ class _YandexWorker(QThread):
     def busy(self) -> bool:
         with self._lock:
             return bool(self._jobs)
+
+    @property
+    def stopping(self) -> bool:
+        with self._lock:
+            return self._stopping
 
     def set_token(self, token: str | None) -> None:
         """Install a new token; the client is rebuilt on the worker thread."""
@@ -835,7 +974,11 @@ class YandexService(QObject):
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
-        self._worker = _YandexWorker(token, client_factory, self)
+        self._factory: ClientFactory = client_factory or default_client_factory
+        self._worker = _YandexWorker(token, self._factory, self)
+        self._feedback = _FeedbackQueue()
+        self._feedback_bridge = _FeedbackBridge(self)
+        self._feedback_bridge.delivered.connect(self._on_feedback_delivered, Qt.QueuedConnection)
         self._lock = threading.RLock()
         self._session: dict[str, Any] = {}
         self._queue: deque[WaveTrack] = deque()
@@ -867,8 +1010,9 @@ class YandexService(QObject):
             self._worker.start()
 
     def shutdown(self) -> None:
-        """Stop the worker and clear the session state."""
+        """Stop the worker, the feedback pool and clear the session state."""
         self._worker.stop()
+        self._feedback.close()
         with self._lock:
             self._session.clear()
             self._queue.clear()
@@ -914,7 +1058,15 @@ class YandexService(QObject):
 
     @property
     def is_busy(self) -> bool:
-        return self._worker.busy
+        return self._worker.busy or self.feedback_busy
+
+    @property
+    def feedback_busy(self) -> bool:
+        """Whether rotor feedback events are still in flight.
+
+        Callers (shutdown, tests) wait on this instead of guessing with a timer.
+        """
+        return self._feedback.busy
 
     @property
     def from_field(self) -> str:
@@ -1450,19 +1602,21 @@ class YandexService(QObject):
         track: WaveTrack | None = None,
         played_seconds: float | None = None,
     ) -> bool:
-        """Send one rotor feedback event with a payload the API accepts.
+        """Queue one rotor feedback event without blocking the API worker.
 
-        The API expects an ISO 8601 ``timestamp`` and, for track events, both the
-        station ``batch_id`` and a ``track_id``; a message without them is
-        rejected as "condition is not met". ``station`` travels in the documented
-        ``type:tag`` wire form (``user:onyourwave`` is the personal station),
-        because the endpoint carries it in the request path.
+        The event travels through :mod:`core.network` on a small thread pool
+        instead of the serial request queue, so a slow or hanging feedback call
+        can never delay the station request that fetches the next track. The
+        chain itself does not depend on feedback: the cursor is carried by the
+        ``queue`` argument of the next station request, which the worker still
+        executes first.
         """
         if not self._token:
             return False
+        if self._worker.stopping:
+            return False
         if not self._wave_started and event != FEEDBACK_RADIO_STARTED:
             return False
-        self.start()
         station = self._station
         origin = self.from_field
         with self._lock:
@@ -1485,25 +1639,27 @@ class YandexService(QObject):
             with self._lock:
                 if self._current is not None and self._current.track_id == track.track_id:
                     self._current_started = True
+        token = self._token
+        payload = Feedback(
+            station=station,
+            event=event,
+            origin=origin,
+            batch_id=batch_id,
+            track_id=track_id,
+            played_seconds=total,
+            token=token,
+        )
+        emit = _report_feedback(weakref.ref(self._feedback_bridge))
+        return self._feedback.submit(self._factory, token, payload, emit)
 
-        def call(client: Any) -> Any:
-            return client.rotor_station_feedback(
-                station,
-                event,
-                timestamp=_feedback_timestamp(),
-                from_=origin,
-                batch_id=batch_id,
-                total_played_seconds=total,
-                track_id=track_id,
-            )
+    @Slot(str, str)
+    def _on_feedback_delivered(self, track_id: str, event: str) -> None:
+        """Receives the pool thread's result as a queued call, in this thread.
 
-        def ok(_result: Any) -> None:
-            self.feedback_sent.emit(track_id or "", event)
-
-        def err(exc: Exception) -> None:
-            log.debug("feedback %s failed: %s", event, exc)
-
-        return self._submit(_Job(f"feedback:{event}", call, ok, err))
+        ``feedback_sent`` therefore stays a signal of the service thread, as it
+        was when the events travelled through the serial request queue.
+        """
+        self.feedback_sent.emit(track_id, event)
 
     def like(self, track: Any = None) -> bool:
         """Add a like; the server drops a previous dislike for the same track."""
