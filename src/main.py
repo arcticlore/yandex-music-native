@@ -7,6 +7,7 @@ Works when executed as ``python src/main.py`` from a checkout (bootstraps
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,11 @@ def _bootstrap_path() -> None:
 
 def main() -> int:
     _bootstrap_path()
-    from yamusic.app import main as _app_main
+    if os.environ.get("YML_LEGACY") == "1":
+        from yamusic.app import main as _legacy_main
+
+        return _legacy_main()
+    from ui.app import main as _app_main
 
     return _app_main()
 

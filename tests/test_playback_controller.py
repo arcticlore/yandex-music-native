@@ -272,6 +272,14 @@ class FakeClient:
         self.variants: list = []
         self.station_error: Exception | None = None
         self.download_error: Exception | None = None
+        self.search_error: Exception | None = None
+        self.search_calls: list[tuple[str, int]] = []
+        self.liked_calls: list[tuple[str, object]] = []
+        self.search_result: object = SimpleNamespace(
+            tracks=(), albums=(), artists=(), playlists=()
+        )
+        self.liked_tracks_result: object = SimpleNamespace(tracks=())
+        self.liked_albums_result: object = SimpleNamespace(albums=())
         self.uid = 777
 
     def init(self) -> None:
@@ -345,6 +353,23 @@ class FakeClient:
         if self.download_error is not None:
             raise self.download_error
         return list(self.variants)
+
+    def search(self, text, page=0, type_="all", **kwargs):
+        self.calls.append("search")
+        self.search_calls.append((text, page))
+        if self.search_error is not None:
+            raise self.search_error
+        return self.search_result
+
+    def users_likes_tracks(self, user_id=None, **kwargs):
+        self.calls.append("users_likes_tracks")
+        self.liked_calls.append(("tracks", user_id))
+        return self.liked_tracks_result
+
+    def users_likes_albums(self, user_id=None, **kwargs):
+        self.calls.append("users_likes_albums")
+        self.liked_calls.append(("albums", user_id))
+        return self.liked_albums_result
 
 
 class Rig:
@@ -628,7 +653,7 @@ def test_radio_feedback_and_cursor(app: QApplication) -> None:
         check("wave settles", rig.settle())
         check("wave mode", rig.controller.mode == QueueMode.RADIO)
         check("wave settings applied", rig.client.settings_calls[0][1:] == ("calm", "default", "russian"), rig.client.settings_calls)
-        check("wave settings signal", ("settings", {"mood_energy": "calm", "diversity": "default", "language": "russian"}) in rig.events)
+        check("wave settings signal", ("settings", {"mood": "fun", "activity": "rest", "mood_energy": "calm", "diversity": "default", "language": "russian"}) in rig.events, [item for item in rig.events if item[0] == "settings"])
         check("wave first station call", rig.client.station_calls[0]["queue"] is None)
         check("wave radio feedback", len(rig.feedback(FEEDBACK_RADIO_STARTED)) == 1)
         check("wave started feedback", [item["track_id"] for item in rig.feedback(FEEDBACK_TRACK_STARTED)] == ["101:7"], rig.client.feedback_calls)
@@ -828,7 +853,7 @@ def test_marks_and_settings(app: QApplication) -> None:
         check("apply settings", rig.controller.apply_wave_settings(mood_energy="calm", diversity="discover"))
         check("apply settings settles", rig.settle())
         check("apply settings call", rig.client.settings_calls[-1][1:] == ("calm", "discover", "any"), rig.client.settings_calls)
-        check("apply settings signal", ("settings", {"mood_energy": "calm", "diversity": "discover", "language": "any"}) in rig.events)
+        check("apply settings signal", ("settings", {"mood": "calm", "activity": "all", "mood_energy": "calm", "diversity": "discover", "language": "all"}) in rig.events, [item for item in rig.events if item[0] == "settings"])
         check("apply settings property", rig.controller.settings["mood_energy"] == "calm")
         check("bad mood energy", rig.controller.apply_wave_settings(mood_energy="wrong") is False)
         check("bad mood energy error", any(item[0] == "wave_error" for item in rig.events))

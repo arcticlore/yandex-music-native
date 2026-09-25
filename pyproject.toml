@@ -47,8 +47,8 @@ dev = [
 ]
 
 [project.scripts]
-yandex-music-native = "yamusic.app:main"
-yandex-music-linux = "yamusic.app:main"
+yandex-music-native = "ui.app:main"
+yandex-music-linux = "ui.app:main"
 
 [project.urls]
 Homepage = "https://github.com/yandex-music-linux/yandex-music-linux"

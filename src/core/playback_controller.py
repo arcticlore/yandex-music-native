@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
+from core import station
 from core.audio_engine import STATE_PAUSED, STATE_PLAYING, STATE_STOPPED, AudioEngine
 from core.yandex_service import (
     DEFAULT_COVER_SIZE,
@@ -33,9 +34,6 @@ from core.yandex_service import (
     StreamLink,
     WaveTrack,
     YandexService,
-    normalize_diversity,
-    normalize_language,
-    normalize_mood_energy,
     track_cover_url,
 )
 
@@ -416,14 +414,22 @@ class PlaybackController(QObject):
         mood: str | int | None = None,
         activity: str | int | None = None,
         language: str | None = None,
+        diversity: str | None = None,
     ) -> bool:
-        """Start «Моя волна» with the classic mood/activity 0-1 scale.
+        """Start «Моя волна» with validated ``mood``/``activity``/``language``.
 
         ``mode`` is accepted for symmetry with :meth:`play_playlist`; the wave
         always runs in :attr:`QueueMode.RADIO`.
         """
         if QueueMode(mode) != QueueMode.RADIO:
             log.info("start_wave called with mode %s, using radio", mode)
+        try:
+            station.resolve_settings(
+                mood=mood, activity=activity, language=language, diversity=diversity
+            )
+        except ValueError as exc:
+            self.wave_error.emit(str(exc))
+            return False
         self._mode = QueueMode.RADIO
         self._manual_queue = []
         self._manual_index = -1
@@ -431,8 +437,12 @@ class PlaybackController(QObject):
         self._engine.stop()
         self._set_buffering(True)
         self._emit_queue()
-        self._emit_settings(mood=mood, activity=activity, language=language)
-        return self._service.start_my_wave(mood=mood, energy=activity, language=language)
+        self._emit_settings(
+            mood=mood, activity=activity, language=language, diversity=diversity
+        )
+        return self._service.start_my_wave(
+            mood=mood, activity=activity, language=language, diversity=diversity
+        )
 
     def apply_wave_settings(
         self,
@@ -440,6 +450,8 @@ class PlaybackController(QObject):
         diversity: str | None = None,
         language: str | None = None,
         restart: bool = True,
+        mood: str | None = None,
+        activity: str | None = None,
     ) -> bool:
         """Change the station settings through ``rotor_station_settings2``."""
         return self._service.apply_settings(
@@ -447,6 +459,8 @@ class PlaybackController(QObject):
             diversity=diversity,
             language=language,
             restart=restart,
+            mood=mood,
+            activity=activity,
         )
 
     def _start_manual(self, items: list[WaveTrack], index: int) -> bool:
@@ -776,8 +790,15 @@ class PlaybackController(QObject):
         self._stop_playback(report=False)
 
     def _on_settings_applied(self, mood_energy: str, diversity: str, language: str) -> None:
+        preferences = self._service.preferences()
         self.wave_settings_changed.emit(
-            {"mood_energy": mood_energy, "diversity": diversity, "language": language}
+            {
+                "mood": preferences.mood or station.DEFAULT_MOOD,
+                "activity": preferences.activity or station.DEFAULT_ACTIVITY,
+                "mood_energy": mood_energy or "all",
+                "diversity": diversity or station.DEFAULT_DIVERSITY,
+                "language": preferences.language or station.DEFAULT_LANGUAGE,
+            }
         )
 
     def _emit_settings(
@@ -785,17 +806,30 @@ class PlaybackController(QObject):
         mood: str | int | None = None,
         activity: str | int | None = None,
         language: str | None = None,
+        diversity: str | None = None,
     ) -> None:
-        current = self._service.settings()
+        current = self._service.preferences()
         try:
-            mood_value = normalize_mood_energy(mood, activity) or current[0] or "all"
-            language_value = normalize_language(language) or current[2] or DEFAULT_LANGUAGE
-            diversity_value = normalize_diversity(None) or current[1] or DEFAULT_DIVERSITY
+            requested = station.resolve_settings(
+                mood=mood,
+                activity=activity,
+                language=language,
+                diversity=diversity,
+            )
         except ValueError:
             return
+        preferences = station.WaveSettings(
+            mood=requested.mood if mood is not None else current.mood,
+            activity=requested.activity if activity is not None else current.activity,
+            language=requested.language if language is not None else current.language,
+            diversity=requested.diversity if diversity is not None else current.diversity,
+        )
+        mood_energy, diversity_value, language_value = preferences.to_wire()
         self.wave_settings_changed.emit(
             {
-                "mood_energy": mood_value,
+                "mood": preferences.mood or station.DEFAULT_MOOD,
+                "activity": preferences.activity or station.DEFAULT_ACTIVITY,
+                "mood_energy": mood_energy,
                 "diversity": diversity_value,
                 "language": language_value,
             }

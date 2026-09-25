@@ -45,7 +45,9 @@ from typing import Any, Callable, Iterable
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from core import station
 from core.auth import AuthService
+from core.station import WaveSettings
 
 log = logging.getLogger(__name__)
 
@@ -332,6 +334,199 @@ class WaveTrack:
         if track is None:
             return None
         return cls.from_track(track, liked=bool(getattr(item, "liked", False)), source=source)
+
+
+@dataclass(frozen=True)
+class CatalogItem:
+    """A non-track entity (album, artist, playlist) shown in the GUI."""
+
+    id: str
+    title: str
+    subtitle: str = ""
+    kind: str = ""
+    cover_url: str | None = None
+    year: int = 0
+    track_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "kind": self.kind,
+            "cover_url": self.cover_url,
+            "year": self.year,
+            "track_count": self.track_count,
+        }
+
+    @classmethod
+    def from_album(cls, album: Any) -> "CatalogItem | None":
+        raw_id = _text(getattr(album, "id", None))
+        if not raw_id:
+            return None
+        artists = ", ".join(
+            name
+            for name in (
+                _text(getattr(item, "name", None))
+                for item in (getattr(album, "artists", None) or ())
+            )
+            if name
+        )
+        year = 0
+        track_count = 0
+        if getattr(album, "release_date", None) is not None:
+            year = _text(getattr(album.release_date, "year", "")) or "0"
+            try:
+                year = int(year)
+            except ValueError:
+                year = 0
+        try:
+            track_count = int(getattr(album, "track_count", 0) or 0)
+        except (TypeError, ValueError):
+            track_count = 0
+        return cls(
+            id=raw_id,
+            title=_text(getattr(album, "title", None)) or "Без названия",
+            subtitle=artists,
+            kind="album",
+            cover_url=track_cover_url(album),
+            year=year,
+            track_count=track_count,
+        )
+
+    @classmethod
+    def from_artist(cls, artist: Any) -> "CatalogItem | None":
+        raw_id = _text(getattr(artist, "id", None))
+        if not raw_id:
+            return None
+        return cls(
+            id=raw_id,
+            title=_text(getattr(artist, "name", None)) or "Без имени",
+            kind="artist",
+            cover_url=track_cover_url(artist),
+        )
+
+    @classmethod
+    def from_playlist(cls, playlist: Any) -> "CatalogItem | None":
+        raw_id = _text(getattr(playlist, "id", None)) or _text(getattr(playlist, "kind", None))
+        if not raw_id:
+            return None
+        try:
+            track_count = int(getattr(playlist, "track_count", 0) or 0)
+        except (TypeError, ValueError):
+            track_count = 0
+        owner = _text(getattr(playlist, "owner", None) and getattr(playlist.owner, "name", None))
+        return cls(
+            id=raw_id,
+            title=_text(getattr(playlist, "title", None)) or "Без названия",
+            subtitle=owner,
+            kind="playlist",
+            cover_url=track_cover_url(playlist),
+            track_count=track_count,
+        )
+
+
+@dataclass(frozen=True)
+class SearchResults:
+    """One page of ``client.search`` reduced to what the GUI can render."""
+
+    query: str
+    tracks: tuple[WaveTrack, ...] = ()
+    albums: tuple[CatalogItem, ...] = ()
+    artists: tuple[CatalogItem, ...] = ()
+    playlists: tuple[CatalogItem, ...] = ()
+
+    @property
+    def total(self) -> int:
+        return len(self.tracks) + len(self.albums) + len(self.artists) + len(self.playlists)
+
+    @property
+    def is_empty(self) -> bool:
+        return self.total == 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "tracks": [item.to_dict() for item in self.tracks],
+            "albums": [item.to_dict() for item in self.albums],
+            "artists": [item.to_dict() for item in self.artists],
+            "playlists": [item.to_dict() for item in self.playlists],
+        }
+
+
+LIKED_SECTIONS = ("tracks", "albums", "artists", "playlists")
+
+
+def _iter_section(raw: Any, name: str) -> list[Any]:
+    section = getattr(raw, name, None)
+    if section is None and isinstance(raw, dict):
+        section = raw.get(name)
+    return list(section or ())
+
+
+def search_results(query: str, raw: Any) -> SearchResults:
+    """Convert a ``Search`` response into :class:`SearchResults`."""
+    tracks = tuple(
+        item
+        for item in (
+            WaveTrack.from_track(track, source="search")
+            for track in _iter_section(raw, "tracks")
+        )
+        if item is not None
+    )
+    albums = tuple(
+        item
+        for item in (
+            CatalogItem.from_album(album) for album in _iter_section(raw, "albums")
+        )
+        if item is not None
+    )
+    artists = tuple(
+        item
+        for item in (
+            CatalogItem.from_artist(artist) for artist in _iter_section(raw, "artists")
+        )
+        if item is not None
+    )
+    playlists = tuple(
+        item
+        for item in (
+            CatalogItem.from_playlist(playlist)
+            for playlist in _iter_section(raw, "playlists")
+        )
+        if item is not None
+    )
+    return SearchResults(
+        query=query,
+        tracks=tracks,
+        albums=albums,
+        artists=artists,
+        playlists=playlists,
+    )
+
+
+def liked_items(section: str, raw: Any) -> tuple[WaveTrack, ...] | tuple[CatalogItem, ...]:
+    """Convert a ``users_likes_*`` response into renderable items."""
+    if _text(section) == "tracks":
+        return tuple(
+            item
+            for item in (
+                WaveTrack.from_track(track, liked=True, source="likes")
+                for track in _iter_section(raw, "tracks")
+            )
+            if item is not None
+        )
+    builders = {
+        "albums": CatalogItem.from_album,
+        "artists": CatalogItem.from_artist,
+        "playlists": CatalogItem.from_playlist,
+    }
+    builder = builders.get(_text(section), CatalogItem.from_album)
+    return tuple(
+        item
+        for item in (builder(entry) for entry in _iter_section(raw, _text(section)))
+        if item is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -635,6 +830,11 @@ class YandexService(QObject):
     dislike_error = Signal(str, str)
 
     settings_applied = Signal(str, str, str)
+    preferences_changed = Signal(object)
+    search_ready = Signal(object)
+    search_failed = Signal(str)
+    collection_ready = Signal(str, object)
+    collection_failed = Signal(str)
     stream_ready = Signal(object)
     stream_error = Signal(str, str)
     busy_changed = Signal(bool)
@@ -663,6 +863,7 @@ class YandexService(QObject):
         self._current_since = 0.0
         self._last_dispatched: str | None = None
         self._settings: tuple[str, str, str] = ("", "", "")
+        self._preferences = WaveSettings()
         self._stream_cache: dict[tuple[str, str, bool], tuple[float, StreamLink]] = {}
         self._stream_errors: dict[tuple[str, str, bool], float] = {}
         self._likes: set[str] = set()
@@ -798,15 +999,25 @@ class YandexService(QObject):
         language: str | None = None,
         diversity: str | None = None,
         mood_energy: str | None = None,
+        activity: str | None = None,
     ) -> bool:
         """Load the personal station queue, applying settings when they change."""
         try:
-            mood_value = normalize_mood_energy(mood, energy, mood_energy)
-            language_value = normalize_language(language)
-            diversity_value = normalize_diversity(diversity) or DEFAULT_DIVERSITY
+            preferences = station.resolve_settings(
+                mood=mood,
+                activity=activity,
+                language=language,
+                diversity=diversity,
+                energy=energy,
+                mood_energy=mood_energy,
+            )
         except ValueError as exc:
             self.wave_error.emit(str(exc))
             return False
+        explicit = any(
+            value is not None
+            for value in (mood, energy, activity, mood_energy, language, diversity)
+        )
         if not self._token:
             self.wave_error.emit("Нет авторизации: войдите в аккаунт")
             return False
@@ -821,9 +1032,10 @@ class YandexService(QObject):
             self._last_dispatched = None
             self._prefetching = False
             self._wave_started = True
-            target = (mood_value or "", diversity_value, language_value or "")
-        if mood_value or language_value or (diversity_value != DEFAULT_DIVERSITY):
-            self._apply_station_settings(target, restart=False)
+            self._preferences = preferences
+        self.preferences_changed.emit(preferences)
+        if explicit:
+            self._apply_station_settings(preferences.to_wire(), restart=False)
         self._send_feedback(FEEDBACK_RADIO_STARTED)
         return self._load_batch(first=True)
 
@@ -840,12 +1052,24 @@ class YandexService(QObject):
         diversity: str | None = None,
         language: str | None = None,
         restart: bool = True,
+        mood: str | None = None,
+        activity: str | None = None,
+        energy: str | int | None = None,
     ) -> bool:
-        """Change station settings through ``rotor_station_settings2``."""
+        """Change station settings through ``rotor_station_settings2``.
+
+        Only the axes that are passed are touched; ``"all"`` resets an axis back
+        to the server default.
+        """
         try:
-            mood_value = normalize_mood_energy(mood_energy=mood_energy)
-            language_value = normalize_language(language)
-            diversity_value = normalize_diversity(diversity)
+            requested = station.resolve_settings(
+                mood=mood,
+                activity=activity,
+                energy=energy,
+                mood_energy=mood_energy,
+                language=language,
+                diversity=diversity,
+            )
         except ValueError as exc:
             self.wave_error.emit(str(exc))
             return False
@@ -854,13 +1078,19 @@ class YandexService(QObject):
             return False
         self.start()
         with self._lock:
-            current = self._settings
-            target = (
-                mood_value if mood_value is not None else current[0],
-                diversity_value if diversity_value is not None else (current[1] or DEFAULT_DIVERSITY),
-                language_value if language_value is not None else (current[2] or DEFAULT_LANGUAGE),
-            )
-        self._apply_station_settings(target, restart=restart)
+            current = self._preferences
+        preferences = WaveSettings(
+            mood=requested.mood if (mood is not None or mood_energy is not None) else current.mood,
+            activity=requested.activity
+            if (activity is not None or energy is not None)
+            else current.activity,
+            language=requested.language if language is not None else current.language,
+            diversity=requested.diversity if diversity is not None else current.diversity,
+        )
+        with self._lock:
+            self._preferences = preferences
+        self.preferences_changed.emit(preferences)
+        self._apply_station_settings(preferences.to_wire(), restart=restart)
         return True
 
     def _apply_station_settings(self, target: tuple[str, str, str], restart: bool) -> bool:
@@ -868,11 +1098,11 @@ class YandexService(QObject):
         mood_value = mood_value or "all"
         language_value = language_value or DEFAULT_LANGUAGE
         diversity_value = diversity_value or DEFAULT_DIVERSITY
-        station = self._station
+        station_id = self._station
 
         def call(client: Any) -> Any:
             return client.rotor_station_settings2(
-                station,
+                station_id,
                 mood_value,
                 diversity_value,
                 language=language_value,
@@ -991,6 +1221,59 @@ class YandexService(QObject):
             if not force and self.remaining() > PREFETCH_THRESHOLD:
                 return False
         return self._load_batch(force=force)
+
+    # -- search and collection ----------------------------------------------
+
+    def search(self, query: str, page: int = 0) -> bool:
+        """Search tracks, albums, artists and playlists; results arrive async."""
+        text = _text(query)
+        if not text:
+            self.search_failed.emit("Введите поисковый запрос")
+            return False
+        if not self._token:
+            self.search_failed.emit("Нет авторизации: войдите в аккаунт")
+            return False
+        self.start()
+        number = max(0, int(page))
+
+        def call(client: Any) -> Any:
+            return client.search(text, page=number)
+
+        def ok(result: Any) -> None:
+            self.search_ready.emit(search_results(text, result))
+
+        def err(exc: Exception) -> None:
+            self.search_failed.emit(readable_error(exc))
+
+        return self._submit(_Job("search", call, ok, err))
+
+    def load_liked(self, section: str = "tracks") -> bool:
+        """Load a liked section of the current account."""
+        key = _text(section) or "tracks"
+        if key not in LIKED_SECTIONS:
+            self.collection_failed.emit("Неизвестный раздел коллекции: " + key)
+            return False
+        if not self._token:
+            self.collection_failed.emit("Нет авторизации: войдите в аккаунт")
+            return False
+        with self._lock:
+            uid = self._session.get("uid")
+        if not uid:
+            self.collection_failed.emit("Нет авторизации: войдите в аккаунт")
+            return False
+        self.start()
+        method = f"users_likes_{key}"
+
+        def call(client: Any) -> Any:
+            return getattr(client, method)(uid)
+
+        def ok(result: Any) -> None:
+            self.collection_ready.emit(key, liked_items(key, result))
+
+        def err(exc: Exception) -> None:
+            self.collection_failed.emit(readable_error(exc))
+
+        return self._submit(_Job("load_liked", call, ok, err))
 
     # -- queue -------------------------------------------------------------
 
@@ -1397,6 +1680,11 @@ class YandexService(QObject):
         with self._lock:
             return self._settings
 
+    def preferences(self) -> WaveSettings:
+        """The validated mood/activity/language/diversity selection."""
+        with self._lock:
+            return self._preferences
+
 
 def _track_key(track: Any) -> str:
     if track is None:
@@ -1440,6 +1728,7 @@ def readable_error(exc: Exception) -> str:
 
 __all__ = [
     "COVER_SIZES",
+    "CatalogItem",
     "DIVERSITY_LABELS",
     "DIVERSITY_VALUES",
     "FEEDBACK_RADIO_STARTED",
@@ -1448,22 +1737,27 @@ __all__ = [
     "FEEDBACK_TRACK_STARTED",
     "LANGUAGE_LABELS",
     "LANGUAGE_VALUES",
+    "LIKED_SECTIONS",
     "MOOD_ENERGY_LABELS",
     "MOOD_ENERGY_VALUES",
     "PREFETCH_THRESHOLD",
     "QUALITY_AUTO",
     "QUALITY_FLAC",
     "QUALITY_LOSSLESS",
+    "SearchResults",
     "StreamLink",
     "WAVE_STATION",
+    "WaveSettings",
     "WaveTrack",
     "YandexService",
     "cover_size",
     "default_client_factory",
+    "liked_items",
     "normalize_diversity",
     "normalize_language",
     "normalize_mood_energy",
     "readable_error",
+    "search_results",
     "select_variant",
     "stream_link",
     "track_cover_url",
