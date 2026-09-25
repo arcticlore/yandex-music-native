@@ -1,7 +1,7 @@
 # Яндекс Музыка — нативный Linux-клиент
 
-[![CI](https://github.com/yandex-music-linux/yandex-music-linux/actions/workflows/ci.yml/badge.svg)](https://github.com/yandex-music-linux/yandex-music-linux/actions/workflows/ci.yml)
-[![Release](https://github.com/yandex-music-linux/yandex-music-linux/actions/workflows/release.yml/badge.svg)](https://github.com/yandex-music-linux/yandex-music-linux/actions/workflows/release.yml)
+[![CI](https://github.com/arcticlore/yandex-music-native/actions/workflows/ci.yml/badge.svg)](https://github.com/arcticlore/yandex-music-native/actions/workflows/ci.yml)
+[![Release](https://github.com/arcticlore/yandex-music-native/actions/workflows/release.yml/badge.svg)](https://github.com/arcticlore/yandex-music-native/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![PySide6](https://img.shields.io/badge/PySide6-6.6%2B-41b883.svg)](https://doc.qt.io/qtforpython/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -44,11 +44,10 @@ MPRIS2 / Tray / Notifications — Linux desktop integration
 | Модуль | Что реализовано |
 |---|---|
 | Авторизация | OAuth Device Flow (код в браузере) и вход по токену; Secret Service / `credentials.json` (0600) |
-| Плеер | HQ 320 / **Lossless FLAC** (libmpv), буферизация, перемотка, громкость, кэш треков |
-| Моя волна | `user:onyourwave` + feedback `radioStarted/trackStarted/trackFinished/skip`, лайк/дизлайк |
-| Визуализаторы | Полосы с гравитацией пиков, неон-волна, круговой эквалайзер — 60 FPS |
-| Контент | Поиск, плейлисты, любимые, дрил-даун артиста/альбома |
-| Тексты | Обычный текст + караоке-синхронизация |
+| Плеер | HQ 320 / **Lossless FLAC** (libmpv), буферизация, перемотка, громкость |
+| Моя волна | `user:onyourwave`, настройки mood/activity/language/diversity с мгновенным рестартом, feedback `radioStarted/trackStarted/trackFinished/skip`, лайк/дизлайк |
+| Визуализаторы | Полосы с гравитацией пиков, неон-волна, круговой спектр с обложкой — 60 FPS, attack/release-сглаживание |
+| Контент | Поиск с счётчиками по вкладкам, коллекция: треки, альбомы, исполнители, плейлисты |
 | Desktop | MPRIS2 (медиаклавиши), трей, `org.freedesktop.Notifications` |
 
 ## Системные зависимости
@@ -74,10 +73,12 @@ make run
 
 Окружение:
 
-* `YAMUSIC_SMOKE=1` — без авторизации, автовыход (CI),
-* `YAMUSIC_AUTOSTART=1` — сразу «Моя волна»,
-* `YAMUSIC_DEBUG=1` — debug-логи,
-* `YAMUSIC_AO=null` — тестовый вывод без звука,
+* `YML_AUDIO_AO=pipewire|pulse|null` — звуковой сервер (по умолчанию autodetect),
+* `YML_PCM_TAP=auto|parec|fifo|off` — источник PCM для визуализатора,
+* `YML_PCM_FIFO` / `YML_PCM_WRITER` — свой FIFO и команда-писатель в него,
+* `YML_HWACCEL=auto|yes|no` — аппаратное декодирование,
+* `YML_OAUTH_CLIENT_ID` — свой OAuth client id,
+* `YML_LOG_LEVEL=DEBUG` — подробные логи,
 * `QT_QPA_PLATFORM=offscreen` — headless.
 
 ## Установка (XDG / freedesktop)
@@ -93,7 +94,8 @@ sudo make uninstall
 * `bin/yandex-music-native` — лаунчер
 * `share/applications/yandex-music-native.desktop`
 * `share/icons/hicolor/scalable/apps/yandex-music-native.svg`
-* `share/metainfo/org.yamusic.YandexMusicNative.metainfo.xml`
+* `share/metainfo/org.arcticlore.YandexMusicNative.metainfo.xml`
+* `lib/yandex-music-native/{main.py,core,ui}` — исходники стека для офлайн-запуска
 * `share/dbus-1/services/yandex-music-native.service`
 
 ## Пакеты и AppImage
@@ -111,26 +113,29 @@ CI: `.github/workflows/release.yml` на тег `v*` собирает `.deb`, so
 ## Тесты
 
 ```bash
-make test          # ruff-free fast gate: pytest + compileall
-make test-all      # + MPRIS round-trip + живой аудио-пайплайн (нужны mpv/parec)
-make lint          # ruff check src tests
+make lint          # ruff check + ruff format --check (src, tests)
+make format        # ruff format — привести код к каноническому виду
+make test          # pytest + compileall
+make test-all      # + MPRIS round-trip (нужна приватная шина dbus)
 make check         # lint + test (то же, что гоняет CI)
 ```
 
 Подробно:
 
 ```bash
-QT_QPA_PLATFORM=offscreen YAMUSIC_AO=null python3 -m pytest -q   # 91 тест
-dbus-run-session -- python3 tests/mpris_selftest.py               # MPRIS round-trip
-YAMUSIC_AO=null python3 tests/audio_pipeline.py                   # PCM→FFT + mpv
+QT_QPA_PLATFORM=offscreen YML_AUDIO_AO=null python3 -m pytest -q
+dbus-run-session -- python3 tests/mpris_selftest.py                # MPRIS round-trip
 ```
 
-`pytest` собирает 91 тест: 17 сценариев `PlaybackController`, 55 интеграционных
-тестов десктопных сервисов (MPRIS2, уведомления, трей — `test_desktop_integration.py`),
-16 тестов авторизации (`auth_test.py`) и три обёртки над self-contained чек-раннерами
-(`smoke.py`, `yandex_service_test.py`, `core_audio_test.py` — 710 внутренних
-проверок). MPRIS round-trip запускается на отдельной шине (`dbus-run-session`),
-чтобы не зависеть от сессии рабочего стола.
+`pytest` собирает 120+ тестов: сценарии `PlaybackController`
+(`test_playback_controller.py`), десктопные интеграции — MPRIS2, уведомления,
+трей (`test_desktop_integration.py`), новый Qt-оболочечный стек —
+валидаторы станции, визуализаторы, страницы, окно (`test_ui_shell.py`), гейты
+релиза (`test_packaging.py`), авторизация (`auth_test.py`) и self-contained
+чек-раннеры `yandex_service_test.py` и `core_audio_test.py` (живой
+PCM→FFT→mpv пайплайн, ~450 внутренних проверок). MPRIS round-trip запускается
+на отдельной шине (`dbus-run-session`), чтобы не зависеть от сессии рабочего
+стола.
 
 ## Структура репозитория
 
@@ -138,30 +143,23 @@ YAMUSIC_AO=null python3 tests/audio_pipeline.py                   # PCM→FFT + 
 .
 ├── .github/workflows/ci.yml       # ruff + pytest на push/PR (Ubuntu, 3.11/3.12)
 ├── .github/workflows/release.yml  # deb + tar.gz + AppImage → Release (тег v*)
-├── data/
-│   ├── yandex-music-native.desktop # XDG Desktop Entry
-│   └── icons/yandex-music-native.svg
 ├── packaging/
-│   ├── yandex-music-native.desktop
-│   ├── yandex-music-native.metainfo.xml
-│   ├── yandex-music-native.sh      # системный лаунчер
+│   ├── yandex-music-native.desktop # XDG Desktop Entry
+│   ├── yandex-music-native.metainfo.xml # AppStream (id org.arcticlore.*)
+│   ├── yandex-music-native.sh      # системный лаунчер (общий для deb/AUR)
 │   ├── dbus/yandex-music-native.service
 │   ├── icons/hicolor/...
 │   └── debian/build-deb.sh
 ├── scripts/build-appimage.sh
 ├── src/
-│   ├── main.py                     # точка входа
-│   ├── core/                       # новый слой: auth, audio_engine,
-│   │   │                           # yandex_service, playback_controller, config
-│   │   └── yamusic/                # UI (PySide6) поверх core
-│   └── yamusic/
-│       ├── api/                    # worker (QThread+asyncio), facade, auth
-│       ├── audio/                  # libmpv engine, FFT, analyzer 60 FPS
-│       ├── cache/                  # SQLite + файлы
-│       ├── services/               # playback, rotor, lyrics
-│       ├── integration/            # MPRIS2, tray, notifications
-│       ├── ui/                     # theme, widgets, pages
-│       └── resources/
+│   ├── main.py                     # точка входа → ui.app:main
+│   ├── core/                       # auth, audio_engine, config_manager,
+│   │   │                           # mpris, notifications, playback_controller,
+│   │   │                           # station, yandex_service
+│   └── ui/                         # app, main_window, theme, tray,
+│       ├── dialogs/                #   auth_dialog
+│       ├── pages/                  #   wave, collection, search, settings
+│       └── widgets/                #   chips, track_list, visualizer
 ├── tests/                          # pytest + self-contained чек-раннеры
 ├── Makefile                        # run/test/lint/install/install-user/uninstall
 ├── PKGBUILD                        # Arch / AUR

@@ -129,9 +129,7 @@ class SearchPage(QWidget):
             "playlists": len(getattr(results, "playlists", ()) or ()),
         }
         for section, page in self._pages.items():
-            self.tabs.setTabText(
-                self.tabs.indexOf(page), f"{SECTION_TITLES[section]} ({counts[section]})"
-            )
+            self.tabs.setTabText(self.tabs.indexOf(page), f"{SECTION_TITLES[section]} ({counts[section]})")
             entries = list(getattr(results, section, ()) or ())
             if isinstance(page, TrackList):
                 page.set_tracks(entries)
@@ -142,9 +140,7 @@ class SearchPage(QWidget):
             if not entries:
                 page.addItem(QListWidgetItem("Ничего не найдено"))
         total = sum(counts.values())
-        self.status_label.setText(
-            f"«{query}»: найдено {total}" if total else f"«{query}»: ничего не найдено"
-        )
+        self.status_label.setText(f"«{query}»: найдено {total}" if total else f"«{query}»: ничего не найдено")
 
     def _on_failed(self, message: str) -> None:
         self.status_label.setText(message)

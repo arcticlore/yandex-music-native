@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yandex-music-linux"
-version = "0.1.0"
+version = "1.0.0"
 description = "Native Linux desktop client for Yandex Music (PySide6 + libmpv, no Electron)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,9 +34,7 @@ dependencies = [
     "python-mpv>=1.0.5",
     "yandex-music>=3.0",
     "numpy>=1.26",
-    "dbus-next>=0.2.3",
     "keyring>=24.0",
-    "aiohttp>=3.9",
 ]
 
 [project.optional-dependencies]
@@ -51,15 +49,13 @@ yandex-music-native = "ui.app:main"
 yandex-music-linux = "ui.app:main"
 
 [project.urls]
-Homepage = "https://github.com/yandex-music-linux/yandex-music-linux"
-Issues = "https://github.com/yandex-music-linux/yandex-music-linux/issues"
+Homepage = "https://github.com/arcticlore/yandex-music-native"
+Issues = "https://github.com/arcticlore/yandex-music-native/issues"
+Changelog = "https://github.com/arcticlore/yandex-music-native/releases"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["yamusic*", "core*", "ui*"]
-
-[tool.setuptools.package-data]
-yamusic = ["resources/**/*"]
+include = ["core*", "ui*"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

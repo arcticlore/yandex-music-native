@@ -69,10 +69,38 @@ def make_media(tmp: Path) -> dict[str, Path]:
     mp3 = tmp / "tone320.mp3"
     flac = tmp / "tone.flac"
     jobs = [
-        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=4",
-         "-ac", "2", "-c:a", "libmp3lame", "-b:a", "320k", str(mp3)],
-        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=4",
-         "-ac", "2", "-c:a", "flac", str(flac)],
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=4",
+            "-ac",
+            "2",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "320k",
+            str(mp3),
+        ],
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=4",
+            "-ac",
+            "2",
+            "-c:a",
+            "flac",
+            str(flac),
+        ],
     ]
     for cmd in jobs:
         if shutil.which(cmd[0]) is None:
@@ -106,7 +134,9 @@ def test_helpers() -> None:
         check("normalize rejects 128", True)
     check("uri passthrough", uri_to_path("https://cdn/track.mp3") == "https://cdn/track.mp3")
     check("uri file", uri_to_path("file:///home/u/a%20b.flac") == "/home/u/a b.flac")
-    check("ao detected", detect_audio_output() in ("pulse", "pipewire", "null", "auto"), detect_audio_output())
+    check(
+        "ao detected", detect_audio_output() in ("pulse", "pipewire", "null", "auto"), detect_audio_output()
+    )
     ensure_libmpv()
     check("libmpv available", True)
 
@@ -299,7 +329,11 @@ def test_transport(app: QCoreApplication, media: dict[str, Path]) -> None:
     engine.stop()
     engine.seek(500)
     check("no media seek returns false", engine.get_position_ms() == 0)
-    check("states observed", "playing" in states and "paused" in states and "stopped" in states, str(set(states)))
+    check(
+        "states observed",
+        "playing" in states and "paused" in states and "stopped" in states,
+        str(set(states)),
+    )
 
     fast = AudioEngine(ao="null", tap_mode="none")
     target = next(iter(media.values()))
@@ -322,7 +356,9 @@ def test_stream_url(app: QCoreApplication) -> None:
     engine.stop()
     check("missing file reported", engine.play("file:///nonexistent/yandex.flac") in (True, False))
     wait_for(app, lambda: bool(errors) or engine.get_position_ms() > 0, timeout=8)
-    check("bad url produced error or empty position", bool(errors) or engine.get_position_ms() == 0, str(errors))
+    check(
+        "bad url produced error or empty position", bool(errors) or engine.get_position_ms() == 0, str(errors)
+    )
     engine.shutdown()
 
 
@@ -407,7 +443,10 @@ def test_tap_selection() -> None:
             check("auto picks fifo when no monitor", isinstance(fifo, _FifoTap))
         check("fifo tap created", isinstance(_FifoTap(lambda b, r: None), _FifoTap))
         os.environ.pop("YML_PCM_FIFO", None)
-    check("default monitor sink probe", _MonitorTap.default_sink() is None or isinstance(_MonitorTap.default_sink(), str))
+    check(
+        "default monitor sink probe",
+        _MonitorTap.default_sink() is None or isinstance(_MonitorTap.default_sink(), str),
+    )
 
 
 def main() -> int:

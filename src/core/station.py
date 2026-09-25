@@ -219,9 +219,7 @@ def _validate(
 ) -> str | None:
     name = _text(value)
     if name in REJECTED_VALUES:
-        raise ValueError(
-            f"значение «{name}» сервер не принимает ({title}): " + ", ".join(allowed)
-        )
+        raise ValueError(f"значение «{name}» сервер не принимает ({title}): " + ", ".join(allowed))
     if name not in aliases:
         raise ValueError(f"неизвестное значение ({title}): " + ", ".join(allowed))
     return aliases[name]
@@ -301,14 +299,10 @@ def legacy_settings(
         else:
             name = _text(value)
             if name in WAVE_MOODS or name in MOOD_ALIASES:
-                result = WaveSettings(
-                    mood=normalize_mood(name), activity=result.activity
-                )
+                result = WaveSettings(mood=normalize_mood(name), activity=result.activity)
                 continue
             if name in WAVE_ACTIVITIES or name in ACTIVITY_ALIASES:
-                result = WaveSettings(
-                    mood=result.mood, activity=normalize_activity(name)
-                )
+                result = WaveSettings(mood=result.mood, activity=normalize_activity(name))
                 continue
             raise ValueError("неизвестное значение (настроение): " + ", ".join(WAVE_MOODS))
         mapped = aliases.get(key)
@@ -320,9 +314,7 @@ def legacy_settings(
                 activity=result.activity,
             )
         else:
-            result = WaveSettings(
-                mood=result.mood, activity=LEGACY_ENERGY_TO_ACTIVITY[mapped]
-            )
+            result = WaveSettings(mood=result.mood, activity=LEGACY_ENERGY_TO_ACTIVITY[mapped])
     return result
 
 
@@ -336,17 +328,13 @@ def resolve_settings(
 ) -> WaveSettings:
     """Validate modern arguments, falling back to the deprecated 0/1 form."""
     if activity is None and energy is None and mood_energy is None:
-        return wave_settings(
-            mood=mood, activity=None, language=language, diversity=diversity
-        )
+        return wave_settings(mood=mood, activity=None, language=language, diversity=diversity)
     base = legacy_settings(mood=mood, energy=energy, mood_energy=mood_energy)
     return WaveSettings(
         mood=base.mood,
         activity=normalize_activity(activity) if activity is not None else base.activity,
         language=normalize_language(language) if language is not None else base.language,
-        diversity=normalize_diversity(diversity)
-        if diversity is not None
-        else base.diversity,
+        diversity=normalize_diversity(diversity) if diversity is not None else base.diversity,
     )
 
 

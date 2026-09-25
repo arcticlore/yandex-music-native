@@ -7,8 +7,9 @@ makes request order deterministic: feedback for a track is always sent before
 the follow-up station request that continues the chain. Results are reported
 through Qt signals, so the GUI thread never blocks on HTTP.
 
-The service is deliberately independent of the ``yamusic`` package: the new
-``core`` layer only depends on ``yandex_music`` itself.
+The service is the only door to the Yandex API for the whole application: the
+UI layer never touches ``yandex_music`` directly, and the ``core`` layer
+depends on nothing but ``yandex_music`` itself.
 
 API mapping notes (verified against yandex-music 3.0.0):
 
@@ -304,7 +305,9 @@ class WaveTrack:
         album = albums[0] if albums else None
         artists = tuple(
             name
-            for name in (_text(getattr(item, "name", None)) for item in (getattr(track, "artists", None) or ()))
+            for name in (
+                _text(getattr(item, "name", None)) for item in (getattr(track, "artists", None) or ())
+            )
             if name
         )
         available = getattr(track, "available", None)
@@ -367,8 +370,7 @@ class CatalogItem:
         artists = ", ".join(
             name
             for name in (
-                _text(getattr(item, "name", None))
-                for item in (getattr(album, "artists", None) or ())
+                _text(getattr(item, "name", None)) for item in (getattr(album, "artists", None) or ())
             )
             if name
         )
@@ -468,32 +470,22 @@ def search_results(query: str, raw: Any) -> SearchResults:
     """Convert a ``Search`` response into :class:`SearchResults`."""
     tracks = tuple(
         item
-        for item in (
-            WaveTrack.from_track(track, source="search")
-            for track in _iter_section(raw, "tracks")
-        )
+        for item in (WaveTrack.from_track(track, source="search") for track in _iter_section(raw, "tracks"))
         if item is not None
     )
     albums = tuple(
         item
-        for item in (
-            CatalogItem.from_album(album) for album in _iter_section(raw, "albums")
-        )
+        for item in (CatalogItem.from_album(album) for album in _iter_section(raw, "albums"))
         if item is not None
     )
     artists = tuple(
         item
-        for item in (
-            CatalogItem.from_artist(artist) for artist in _iter_section(raw, "artists")
-        )
+        for item in (CatalogItem.from_artist(artist) for artist in _iter_section(raw, "artists"))
         if item is not None
     )
     playlists = tuple(
         item
-        for item in (
-            CatalogItem.from_playlist(playlist)
-            for playlist in _iter_section(raw, "playlists")
-        )
+        for item in (CatalogItem.from_playlist(playlist) for playlist in _iter_section(raw, "playlists"))
         if item is not None
     )
     return SearchResults(
@@ -523,9 +515,7 @@ def liked_items(section: str, raw: Any) -> tuple[WaveTrack, ...] | tuple[Catalog
     }
     builder = builders.get(_text(section), CatalogItem.from_album)
     return tuple(
-        item
-        for item in (builder(entry) for entry in _iter_section(raw, _text(section)))
-        if item is not None
+        item for item in (builder(entry) for entry in _iter_section(raw, _text(section))) if item is not None
     )
 
 
@@ -661,9 +651,7 @@ def normalize_mood_energy(
     explicit = _text(mood_energy).lower()
     if explicit:
         if explicit not in MOOD_ENERGY_VALUES:
-            raise ValueError(
-                "неизвестное настроение: " + ", ".join(MOOD_ENERGY_VALUES)
-            )
+            raise ValueError("неизвестное настроение: " + ", ".join(MOOD_ENERGY_VALUES))
         return explicit
     for value, aliases in ((energy, ENERGY_ALIASES), (mood, MOOD_ALIASES)):
         if value is None:
@@ -1015,8 +1003,7 @@ class YandexService(QObject):
             self.wave_error.emit(str(exc))
             return False
         explicit = any(
-            value is not None
-            for value in (mood, energy, activity, mood_energy, language, diversity)
+            value is not None for value in (mood, energy, activity, mood_energy, language, diversity)
         )
         if not self._token:
             self.wave_error.emit("Нет авторизации: войдите в аккаунт")
@@ -1081,9 +1068,7 @@ class YandexService(QObject):
             current = self._preferences
         preferences = WaveSettings(
             mood=requested.mood if (mood is not None or mood_energy is not None) else current.mood,
-            activity=requested.activity
-            if (activity is not None or energy is not None)
-            else current.activity,
+            activity=requested.activity if (activity is not None or energy is not None) else current.activity,
             language=requested.language if language is not None else current.language,
             diversity=requested.diversity if diversity is not None else current.diversity,
         )

@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("YAMUSIC_AO", "null")
+os.environ.setdefault("YML_AUDIO_AO", "null")
 os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="yml-desktop-config-")
 os.environ["XDG_CACHE_HOME"] = tempfile.mkdtemp(prefix="yml-desktop-cache-")
 
@@ -208,7 +208,9 @@ def test_art_url_prefers_local_file(tmp_path: Path) -> None:
     cover.write_bytes(b"x")
     meta = TrackMetadata(id="1:2", title="t", cover_path=str(cover), cover_url="https://a/b.jpg")
     assert art_url(meta) == cover.as_uri()
-    missing = TrackMetadata(id="1:2", title="t", cover_path=str(tmp_path / "gone.jpg"), cover_url="https://a/b.jpg")
+    missing = TrackMetadata(
+        id="1:2", title="t", cover_path=str(tmp_path / "gone.jpg"), cover_url="https://a/b.jpg"
+    )
     assert art_url(missing) == "https://a/b.jpg"
     assert art_url(TrackMetadata(id="1:2", title="t")) is None
 
@@ -455,9 +457,7 @@ def test_mpris_broadcasts_volume(playing: Rig) -> None:
     bus.signals.clear()
     playing.controller.set_volume(20)
     assert mpris.volume == pytest.approx(0.2)
-    assert any(
-        payload.get("Volume") == pytest.approx(0.2) for _, payload in bus.properties_changed()
-    )
+    assert any(payload.get("Volume") == pytest.approx(0.2) for _, payload in bus.properties_changed())
 
 
 def test_mpris_like_updates_rating(playing: Rig) -> None:
@@ -470,8 +470,7 @@ def test_mpris_like_updates_rating(playing: Rig) -> None:
     assert playing.controller.current.liked is True
     assert mpris.metadata()["xesam:userRating"] == 1.0
     assert any(
-        payload.get("Metadata", {}).get("xesam:userRating") == 1.0
-        for _, payload in bus.properties_changed()
+        payload.get("Metadata", {}).get("xesam:userRating") == 1.0 for _, payload in bus.properties_changed()
     )
 
 
@@ -811,10 +810,8 @@ def test_make_icon_pixmaps(app: QApplication) -> None:
 
 
 def test_new_integrations_use_core_config_only() -> None:
-    legacy = ("yamusic.config", "yamusic.settings")
     for module in ("core/mpris.py", "core/notifications.py", "ui/tray.py"):
         source = (ROOT / "src" / module).read_text(encoding="utf-8")
-        for needle in legacy:
-            assert needle not in source, f"{module} still uses {needle}"
+        assert "yamusic" not in source, f"{module} still references the legacy package"
     notifications = (ROOT / "src" / "core/notifications.py").read_text(encoding="utf-8")
     assert "from core.config_manager import ConfigManager" in notifications

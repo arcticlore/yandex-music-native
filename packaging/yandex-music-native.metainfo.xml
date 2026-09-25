@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>org.yamusic.YandexMusicNative</id>
+  <id>org.arcticlore.YandexMusicNative</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>Yandex Music Native</name>
@@ -18,7 +18,9 @@
     </p>
   </description>
   <launchable type="desktop-id">yandex-music-native.desktop</launchable>
-  <url type="homepage">https://github.com/yandex-music-native/yandex-music-native</url>
+  <url type="homepage">https://github.com/arcticlore/yandex-music-native</url>
+  <url type="bugtracker">https://github.com/arcticlore/yandex-music-native/issues</url>
+  <developer_name>Yandex Music Native Contributors</developer_name>
   <provides>
     <binary>yandex-music-native</binary>
   </provides>
@@ -29,6 +31,16 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.0" date="2026-09-25">
+      <description>
+        <p>
+          First stable release: the yamusic package is gone, the application is
+          the core (auth, audio, playback, Yandex service, desktop) plus ui
+          (PySide6 shell) stack, with 60 FPS visualizers and validated
+          «Моя волна» settings.
+        </p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-24"/>
   </releases>
 </component>

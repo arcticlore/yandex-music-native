@@ -18,8 +18,7 @@ jobs:
         python-version: ["3.11", "3.12"]
     env:
       QT_QPA_PLATFORM: offscreen
-      YAMUSIC_AO: "null"
-      YAMUSIC_SMOKE: "1"
+      YML_AUDIO_AO: "null"
     steps:
       - uses: actions/checkout@v4
       - name: System deps
@@ -38,14 +37,14 @@ jobs:
           pip install -e ".[dev]"
       - name: Ruff check
         run: ruff check src tests
+      - name: Ruff format
+        run: ruff format --check src tests
       - name: Byte-compile
         run: python -m compileall -q src tests
       - name: Pytest
         run: python -m pytest -q
       - name: MPRIS self-test (private session bus)
         run: dbus-run-session -- python tests/mpris_selftest.py
-      - name: Audio pipeline
-        run: python tests/audio_pipeline.py
 
   deb:
     needs: test

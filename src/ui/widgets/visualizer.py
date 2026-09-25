@@ -152,9 +152,7 @@ class Smoother:
         if len(target) != self._size:
             self.resize(len(target))
         for index, value in enumerate(target):
-            self._values[index] = smooth_step(
-                self._values[index], value, self.attack, self.release
-            )
+            self._values[index] = smooth_step(self._values[index], value, self.attack, self.release)
         self._peaks = update_peaks(self._peaks, self._values, self.peak_fall)
         return self._values, self._peaks
 
@@ -445,6 +443,7 @@ class RadialVisualizer(VisualizerBase):
 
     def clear_cover(self) -> None:
         self.set_cover(None)
+
     def _paint(self, painter: QPainter) -> None:
         values = self._spectrum.values
         count = len(values)

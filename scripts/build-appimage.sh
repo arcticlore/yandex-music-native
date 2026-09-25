@@ -17,7 +17,7 @@ STAGE="${DIST}/yandex-music-native.AppDir"
 APP="${APPIMAGE_TOOL:-appimagetool}"
 NAME="yandex-music-native"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "${ROOT}/pyproject.toml" | head -1)"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-1.0.0}"
 
 mkdir -p "${DIST}"
 rm -rf "${STAGE}"
@@ -29,12 +29,13 @@ mkdir -p \
   "${STAGE}/usr/share/metainfo" \
   "${STAGE}/usr/lib/python3.12/site-packages" 2>/dev/null || true
 
-# --- sources --------------------------------------------------------------
-cp -a "${ROOT}/src/yamusic" "${STAGE}/usr/lib/${NAME}/"
+# --- sources: the core + ui stack, started by src/main.py -------------------
+cp -a "${ROOT}/src/core" "${ROOT}/src/ui" "${STAGE}/usr/lib/${NAME}/"
 cp "${ROOT}/src/main.py" "${STAGE}/usr/lib/${NAME}/main.py"
+find "${STAGE}/usr/lib/${NAME}" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 cp "${ROOT}/packaging/yandex-music-native.desktop" "${STAGE}/usr/share/applications/"
 cp "${ROOT}/packaging/yandex-music-native.metainfo.xml" \
-  "${STAGE}/usr/share/metainfo/org.yamusic.YandexMusicNative.metainfo.xml"
+  "${STAGE}/usr/share/metainfo/org.arcticlore.YandexMusicNative.metainfo.xml"
 cp "${ROOT}/packaging/icons/hicolor/scalable/apps/${NAME}.svg" \
   "${STAGE}/usr/share/icons/hicolor/scalable/apps/"
 # AppImage root desktop/icon (required by appimagetool)

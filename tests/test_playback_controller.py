@@ -13,9 +13,12 @@ import os
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -54,6 +57,7 @@ from core.yandex_service import (  # noqa: E402
 )
 
 PASSED: list[str] = []
+LIVE_RIGS: list["Rig"] = []
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -275,9 +279,7 @@ class FakeClient:
         self.search_error: Exception | None = None
         self.search_calls: list[tuple[str, int]] = []
         self.liked_calls: list[tuple[str, object]] = []
-        self.search_result: object = SimpleNamespace(
-            tracks=(), albums=(), artists=(), playlists=()
-        )
+        self.search_result: object = SimpleNamespace(tracks=(), albums=(), artists=(), playlists=())
         self.liked_tracks_result: object = SimpleNamespace(tracks=())
         self.liked_albums_result: object = SimpleNamespace(albums=())
         self.uid = 777
@@ -395,6 +397,7 @@ class Rig:
             position_interval_ms=50,
         )
         self._connect_signals()
+        LIVE_RIGS.append(self)
 
     def _factory(self, token: str) -> FakeClient:
         return self.client
@@ -408,22 +411,14 @@ class Rig:
         controller = self.controller
         controller.track_changed.connect(lambda meta: self.events.append(("track", meta.id)))
         controller.state_changed.connect(lambda state: self.events.append(("state", state)))
-        controller.position_changed.connect(
-            lambda pos, total: self.events.append(("position", pos, total))
-        )
-        controller.cover_ready.connect(
-            lambda track_id, path: self.events.append(("cover", track_id, path))
-        )
+        controller.position_changed.connect(lambda pos, total: self.events.append(("position", pos, total)))
+        controller.cover_ready.connect(lambda track_id, path: self.events.append(("cover", track_id, path)))
         controller.stream_changed.connect(
             lambda track_id, text: self.events.append(("stream", track_id, text))
         )
         controller.queue_changed.connect(lambda value: self.events.append(("queue", value)))
-        controller.buffering_changed.connect(
-            lambda value: self.events.append(("buffering", value))
-        )
-        controller.wave_settings_changed.connect(
-            lambda payload: self.events.append(("settings", payload))
-        )
+        controller.buffering_changed.connect(lambda value: self.events.append(("buffering", value)))
+        controller.wave_settings_changed.connect(lambda payload: self.events.append(("settings", payload)))
         controller.like_status_changed.connect(
             lambda track_id, liked: self.events.append(("like", track_id, liked))
         )
@@ -431,9 +426,7 @@ class Rig:
         controller.waveform_data_ready.connect(lambda block: self.events.append(("wave", block)))
         controller.playback_error.connect(lambda text: self.events.append(("error", text)))
         controller.wave_error.connect(lambda text: self.events.append(("wave_error", text)))
-        controller.mark_error.connect(
-            lambda key, text: self.events.append(("mark_error", key, text))
-        )
+        controller.mark_error.connect(lambda key, text: self.events.append(("mark_error", key, text)))
 
     def settle(self, timeout: float = 5.0) -> bool:
         return settle(self.app, self.service, timeout)
@@ -445,9 +438,11 @@ class Rig:
             return self.settle(timeout)
         ok = wait_for(
             self.app,
-            lambda: self.controller.current is not None
-            and self.controller.current.id == expected
-            and self.controller.state == PlaybackState.PLAYING,
+            lambda: (
+                self.controller.current is not None
+                and self.controller.current.id == expected
+                and self.controller.state == PlaybackState.PLAYING
+            ),
             timeout,
         )
         self.settle()
@@ -473,11 +468,28 @@ class Rig:
     def close(self) -> None:
         self.controller.shutdown()
         self.service.shutdown()
+        if self in LIVE_RIGS:
+            LIVE_RIGS.remove(self)
 
     def login(self) -> bool:
         self.service.set_token("token-1")
         ok = self.settle()
         return ok and self.service.is_authenticated
+
+
+@pytest.fixture(autouse=True)
+def _close_rigs_after_test(app: QApplication) -> Iterator[None]:
+    """Stop every controller this module started: no stray QTimer may outlive it.
+
+    A running position timer whose owner is garbage-collected leaves a queued
+    QTimerEvent behind, and the next ``processEvents()`` of another module then
+    dereferences the freed QObject.
+    """
+    yield
+    for rig in list(LIVE_RIGS):
+        rig.close()
+    LIVE_RIGS.clear()
+    app.processEvents()
 
 
 # -- helpers ----------------------------------------------------------------
@@ -490,7 +502,9 @@ def wave_of(track_id: int, title: str = "Song", duration_ms: int = 180000) -> Wa
 
 
 def stream_for(track_id: str) -> StreamLink:
-    return StreamLink(track_id=track_id, url=f"https://direct/{track_id}", codec="flac", bitrate=1411, lossless=True)
+    return StreamLink(
+        track_id=track_id, url=f"https://direct/{track_id}", codec="flac", bitrate=1411, lossless=True
+    )
 
 
 # -- pure helpers -----------------------------------------------------------
@@ -498,7 +512,9 @@ def stream_for(track_id: str) -> StreamLink:
 
 def test_helpers() -> None:
     check("cover cache dir name", cover_cache_dir().name == "covers")
-    check("cover file name stable", cover_file_name("https://a/b/c.jpg") == cover_file_name("https://a/b/c.jpg"))
+    check(
+        "cover file name stable", cover_file_name("https://a/b/c.jpg") == cover_file_name("https://a/b/c.jpg")
+    )
     check("cover file name suffix", cover_file_name("https://a/b/c").endswith(".jpg"))
     check("cover file name webp", cover_file_name("https://a/b/c.webp").endswith(".webp"))
     check("cover file name digest", len(cover_file_name("https://a/b/c.jpg")) == 24)
@@ -533,14 +549,33 @@ def test_manual_playlist(app: QApplication) -> None:
         check("playlist mode", rig.controller.mode == QueueMode.MANUAL)
         check("playlist started index", rig.controller.position == 1)
         check("playlist first track", rig.track_ids() == ["22:7"], rig.track_ids())
-        check("playlist engine url", rig.engine.plays and rig.engine.plays[-1][0].startswith("https://storage"))
-        check("playlist metadata title", rig.controller.current is not None and rig.controller.current.title == "Two")
-        check("playlist metadata artist", rig.controller.current is not None and rig.controller.current.artists == ("Artist",))
-        check("playlist metadata album", rig.controller.current is not None and rig.controller.current.album == "Album 7")
-        check("playlist metadata index", rig.controller.current is not None and rig.controller.current.index == 1)
-        check("playlist metadata duration", rig.controller.current is not None and rig.controller.current.duration_ms == 180000)
+        check(
+            "playlist engine url", rig.engine.plays and rig.engine.plays[-1][0].startswith("https://storage")
+        )
+        check(
+            "playlist metadata title",
+            rig.controller.current is not None and rig.controller.current.title == "Two",
+        )
+        check(
+            "playlist metadata artist",
+            rig.controller.current is not None and rig.controller.current.artists == ("Artist",),
+        )
+        check(
+            "playlist metadata album",
+            rig.controller.current is not None and rig.controller.current.album == "Album 7",
+        )
+        check(
+            "playlist metadata index",
+            rig.controller.current is not None and rig.controller.current.index == 1,
+        )
+        check(
+            "playlist metadata duration",
+            rig.controller.current is not None and rig.controller.current.duration_ms == 180000,
+        )
         check("playlist state playing", rig.controller.state == PlaybackState.PLAYING)
-        check("playlist buffering before playing", "buffering" in rig.states() and rig.states()[-1] == "playing")
+        check(
+            "playlist buffering before playing", "buffering" in rig.states() and rig.states()[-1] == "playing"
+        )
         check("playlist remaining", rig.controller.remaining == 1)
         check("playlist queue signal", ("queue", 1) in rig.events, rig.events_of("queue"))
         check("no feedback in manual", rig.client.feedback_calls == [], rig.client.feedback_calls)
@@ -554,19 +589,32 @@ def test_manual_playlist(app: QApplication) -> None:
         check("playlist next exhausted", rig.controller.next() is False)
         check("playlist exhausted state", rig.controller.state == PlaybackState.STOPPED)
         check("playlist exhausted cleared", rig.controller.current is None)
-        check("playlist position zero", any(item[1] == 0 and item[2] == 0 for item in rig.events_of("position")))
+        check(
+            "playlist position zero", any(item[1] == 0 and item[2] == 0 for item in rig.events_of("position"))
+        )
         check("playlist queue drained", ("queue", 0) in rig.events)
 
-        check("playlist restart via prev", rig.controller.play_playlist(tracks, start_index=0) and rig.settle())
+        check(
+            "playlist restart via prev", rig.controller.play_playlist(tracks, start_index=0) and rig.settle()
+        )
         check("playlist prev clamps", rig.controller.prev() is True)
         check("playlist prev restarts", rig.engine.seeks == [0], rig.engine.seeks)
-        check("playlist prev keeps track", rig.controller.current is not None and rig.controller.current.id == "11:7")
+        check(
+            "playlist prev keeps track",
+            rig.controller.current is not None and rig.controller.current.id == "11:7",
+        )
         check("playlist prev at start", rig.controller.prev() is True)
         check("playlist prev at start seeks", rig.engine.seeks[-1] == 0, rig.engine.seeks)
         check("playlist forward again", rig.controller.next() and rig.settle())
-        check("playlist forward track", rig.controller.current is not None and rig.controller.current.id == "22:7")
+        check(
+            "playlist forward track",
+            rig.controller.current is not None and rig.controller.current.id == "22:7",
+        )
         check("playlist prev back", rig.controller.prev() is True)
-        check("playlist prev back track", rig.controller.current is not None and rig.controller.current.id == "11:7")
+        check(
+            "playlist prev back track",
+            rig.controller.current is not None and rig.controller.current.id == "11:7",
+        )
     finally:
         rig.close()
 
@@ -582,7 +630,9 @@ def test_single_track_and_lookup(app: QApplication) -> None:
         check("play track unknown", rig.controller.play_track("999:1") is False)
         check("play track unknown error", ("error", "Трек не найден в очереди") in rig.events)
         check("play track by known id", rig.controller.play_track("55:7") and rig.settle())
-        check("play track same id", rig.controller.current is not None and rig.controller.current.id == "55:7")
+        check(
+            "play track same id", rig.controller.current is not None and rig.controller.current.id == "55:7"
+        )
         check("play empty playlist", rig.controller.play_playlist([]) is False)
         check("play empty playlist error", ("error", "Нечего играть: очередь пуста") in rig.events)
     finally:
@@ -652,28 +702,69 @@ def test_radio_feedback_and_cursor(app: QApplication) -> None:
         check("start wave", rig.controller.start_wave(mood=1, activity=0, language="ru"))
         check("wave settles", rig.settle())
         check("wave mode", rig.controller.mode == QueueMode.RADIO)
-        check("wave settings applied", rig.client.settings_calls[0][1:] == ("calm", "default", "russian"), rig.client.settings_calls)
-        check("wave settings signal", ("settings", {"mood": "fun", "activity": "rest", "mood_energy": "calm", "diversity": "default", "language": "russian"}) in rig.events, [item for item in rig.events if item[0] == "settings"])
+        check(
+            "wave settings applied",
+            rig.client.settings_calls[0][1:] == ("calm", "default", "russian"),
+            rig.client.settings_calls,
+        )
+        check(
+            "wave settings signal",
+            (
+                "settings",
+                {
+                    "mood": "fun",
+                    "activity": "rest",
+                    "mood_energy": "calm",
+                    "diversity": "default",
+                    "language": "russian",
+                },
+            )
+            in rig.events,
+            [item for item in rig.events if item[0] == "settings"],
+        )
         check("wave first station call", rig.client.station_calls[0]["queue"] is None)
         check("wave radio feedback", len(rig.feedback(FEEDBACK_RADIO_STARTED)) == 1)
-        check("wave started feedback", [item["track_id"] for item in rig.feedback(FEEDBACK_TRACK_STARTED)] == ["101:7"], rig.client.feedback_calls)
+        check(
+            "wave started feedback",
+            [item["track_id"] for item in rig.feedback(FEEDBACK_TRACK_STARTED)] == ["101:7"],
+            rig.client.feedback_calls,
+        )
         check("wave started batch", rig.feedback(FEEDBACK_TRACK_STARTED)[0]["batch_id"] == "batch-a")
-        check("wave playing first", rig.controller.current is not None and rig.controller.current.id == "101:7")
-        check("wave source is station", rig.controller.current is not None and rig.controller.current.source == "user:onyourwave")
-        check("wave stream resolved", rig.engine.plays and rig.engine.plays[-1][0].endswith("flac-1411"), rig.engine.plays)
+        check(
+            "wave playing first", rig.controller.current is not None and rig.controller.current.id == "101:7"
+        )
+        check(
+            "wave source is station",
+            rig.controller.current is not None and rig.controller.current.source == "user:onyourwave",
+        )
+        check(
+            "wave stream resolved",
+            rig.engine.plays and rig.engine.plays[-1][0].endswith("flac-1411"),
+            rig.engine.plays,
+        )
         check("wave lossless flag", rig.controller.current is not None and rig.controller.current.lossless)
         check("wave quality summary", ("stream", "101:7", "flac 1411 kbps") in rig.events)
-        check("wave no duplicate start", len(rig.feedback(FEEDBACK_TRACK_STARTED)) == 1, rig.client.feedback_calls)
+        check(
+            "wave no duplicate start",
+            len(rig.feedback(FEEDBACK_TRACK_STARTED)) == 1,
+            rig.client.feedback_calls,
+        )
 
         check("track finished advances", rig.advance("102:7"))
         finished = rig.feedback(FEEDBACK_TRACK_PLAYED)
         check("finished feedback once", len(finished) == 1, rig.client.feedback_calls)
         check("finished feedback track", finished and finished[0]["track_id"] == "101:7")
-        check("finished feedback seconds", finished and finished[0]["total_played_seconds"] == 180.0, finished)
+        check(
+            "finished feedback seconds", finished and finished[0]["total_played_seconds"] == 180.0, finished
+        )
         check("finished batch id", finished and finished[0]["batch_id"] == "batch-a")
         check("next track started", len(rig.feedback(FEEDBACK_TRACK_STARTED)) == 2, rig.client.feedback_calls)
         check("next track id", rig.controller.current is not None and rig.controller.current.id == "102:7")
-        check("cursor points to finished track", rig.client.station_calls[-1]["queue"] == "101:7", rig.client.station_calls)
+        check(
+            "cursor points to finished track",
+            rig.client.station_calls[-1]["queue"] == "101:7",
+            rig.client.station_calls,
+        )
         check("cursor batch id carried", rig.client.station_calls[-1]["settings2"] is True)
 
         rig.engine.advance_to(5000)
@@ -683,10 +774,16 @@ def test_radio_feedback_and_cursor(app: QApplication) -> None:
         check("skip feedback once", len(skipped) == 1, rig.client.feedback_calls)
         check("skip feedback track", skipped and skipped[0]["track_id"] == "102:7")
         check("skip feedback seconds", skipped and skipped[0]["total_played_seconds"] == 5.0, skipped)
-        check("skip advanced track", rig.controller.current is not None and rig.controller.current.id == "103:7")
+        check(
+            "skip advanced track", rig.controller.current is not None and rig.controller.current.id == "103:7"
+        )
         check("skip cursor", rig.client.station_calls[-1]["queue"] == "102:7", rig.client.station_calls)
         check("skip no finished event", len(rig.feedback(FEEDBACK_TRACK_PLAYED)) == 1)
-        check("no repeated feedback per track", len(rig.feedback(FEEDBACK_TRACK_STARTED)) == 3, rig.client.feedback_calls)
+        check(
+            "no repeated feedback per track",
+            len(rig.feedback(FEEDBACK_TRACK_STARTED)) == 3,
+            rig.client.feedback_calls,
+        )
     finally:
         rig.close()
 
@@ -704,11 +801,17 @@ def test_radio_prefetch_and_resume(app: QApplication) -> None:
         check("prefetch settle", rig.settle())
         check("prefetch top up", len(rig.client.station_calls) == 2, rig.client.station_calls)
         check("prefetch first cursor empty", rig.client.station_calls[1]["queue"] is None)
-        check("prefetch first track", rig.controller.current is not None and rig.controller.current.id == "201:7")
+        check(
+            "prefetch first track",
+            rig.controller.current is not None and rig.controller.current.id == "201:7",
+        )
         check("prefetch remaining", rig.controller.remaining == 7, rig.controller.remaining)
 
         check("prefetch advances", rig.advance("202:7"))
-        check("prefetch second track", rig.controller.current is not None and rig.controller.current.id == "202:7")
+        check(
+            "prefetch second track",
+            rig.controller.current is not None and rig.controller.current.id == "202:7",
+        )
         check("prefetch no extra call", len(rig.client.station_calls) == 2, rig.client.station_calls)
 
         played = ["201:7", "202:7"]
@@ -733,7 +836,9 @@ def test_radio_queue_exhaustion(app: QApplication) -> None:
         ]
         rig.controller.start_wave()
         check("exhaust settle", rig.settle())
-        check("exhaust first track", rig.controller.current is not None and rig.controller.current.id == "401:7")
+        check(
+            "exhaust first track", rig.controller.current is not None and rig.controller.current.id == "401:7"
+        )
         rig.client.station_error = RuntimeError("no more batches")
 
         check("exhaust second track", rig.advance("402:7"))
@@ -749,9 +854,16 @@ def test_radio_queue_exhaustion(app: QApplication) -> None:
         rig.client.batches = [make_batch([make_track(404)], "b3")]
         rig.service.maybe_prefetch(force=True)
         check("exhaust resume settles", rig.settle())
-        check("exhaust resumed track", rig.controller.current is not None and rig.controller.current.id == "404:7")
+        check(
+            "exhaust resumed track",
+            rig.controller.current is not None and rig.controller.current.id == "404:7",
+        )
         check("exhaust resumed playing", rig.controller.state == PlaybackState.PLAYING)
-        check("exhaust resume cursor", rig.client.station_calls[-1]["queue"] == "403:7", rig.client.station_calls)
+        check(
+            "exhaust resume cursor",
+            rig.client.station_calls[-1]["queue"] == "403:7",
+            rig.client.station_calls,
+        )
     finally:
         rig.close()
 
@@ -764,12 +876,18 @@ def test_radio_prev_and_restart(app: QApplication) -> None:
         rig.controller.start_wave()
         check("prev settle", rig.settle())
         check("prev next settles", rig.advance("302:7"))
-        check("prev moved forward", rig.controller.current is not None and rig.controller.current.id == "302:7")
+        check(
+            "prev moved forward", rig.controller.current is not None and rig.controller.current.id == "302:7"
+        )
         started_before = len(rig.feedback(FEEDBACK_TRACK_STARTED))
         check("prev returns track", rig.controller.prev())
         check("prev back settles", rig.settle())
         check("prev back", rig.controller.current is not None and rig.controller.current.id == "301:7")
-        check("prev re-reports start", len(rig.feedback(FEEDBACK_TRACK_STARTED)) == started_before + 1, rig.client.feedback_calls)
+        check(
+            "prev re-reports start",
+            len(rig.feedback(FEEDBACK_TRACK_STARTED)) == started_before + 1,
+            rig.client.feedback_calls,
+        )
         check("prev no extra finished", len(rig.feedback(FEEDBACK_TRACK_PLAYED)) == 1)
         check("prev plays again", rig.settle() and rig.engine.plays[-1][0].endswith("flac-1411"))
     finally:
@@ -793,7 +911,9 @@ def test_radio_errors(app: QApplication) -> None:
         rig.client.batches = [make_batch([make_track(402)], "b2")]
         check("error retry", rig.controller.start_wave())
         check("error retry settles", rig.settle())
-        check("error retry plays", rig.controller.current is not None and rig.controller.current.id == "402:7")
+        check(
+            "error retry plays", rig.controller.current is not None and rig.controller.current.id == "402:7"
+        )
 
         rig.client.station_error = RuntimeError("station down")
         check("error wave restart", rig.controller.start_wave())
@@ -821,8 +941,14 @@ def test_manual_after_radio(app: QApplication) -> None:
         rig.client.batches = [make_batch([make_track(701), make_track(702)], "b2")]
         check("switch back to wave", rig.controller.start_wave())
         check("switch back settles", rig.settle())
-        check("switch no manual feedback", all(item["track_id"] != "601:7" for item in rig.client.feedback_calls), rig.client.feedback_calls)
-        check("switch back radio", rig.controller.mode == QueueMode.RADIO and rig.controller.current is not None)
+        check(
+            "switch no manual feedback",
+            all(item["track_id"] != "601:7" for item in rig.client.feedback_calls),
+            rig.client.feedback_calls,
+        )
+        check(
+            "switch back radio", rig.controller.mode == QueueMode.RADIO and rig.controller.current is not None
+        )
     finally:
         rig.close()
 
@@ -852,8 +978,26 @@ def test_marks_and_settings(app: QApplication) -> None:
 
         check("apply settings", rig.controller.apply_wave_settings(mood_energy="calm", diversity="discover"))
         check("apply settings settles", rig.settle())
-        check("apply settings call", rig.client.settings_calls[-1][1:] == ("calm", "discover", "any"), rig.client.settings_calls)
-        check("apply settings signal", ("settings", {"mood": "calm", "activity": "all", "mood_energy": "calm", "diversity": "discover", "language": "all"}) in rig.events, [item for item in rig.events if item[0] == "settings"])
+        check(
+            "apply settings call",
+            rig.client.settings_calls[-1][1:] == ("calm", "discover", "any"),
+            rig.client.settings_calls,
+        )
+        check(
+            "apply settings signal",
+            (
+                "settings",
+                {
+                    "mood": "calm",
+                    "activity": "all",
+                    "mood_energy": "calm",
+                    "diversity": "discover",
+                    "language": "all",
+                },
+            )
+            in rig.events,
+            [item for item in rig.events if item[0] == "settings"],
+        )
         check("apply settings property", rig.controller.settings["mood_energy"] == "calm")
         check("bad mood energy", rig.controller.apply_wave_settings(mood_energy="wrong") is False)
         check("bad mood energy error", any(item[0] == "wave_error" for item in rig.events))
@@ -900,21 +1044,35 @@ def test_cover_cache(app: QApplication) -> None:
         track = make_track(1001, title="Cover", cover_uri=cover_uri)
         rig.controller.play_track(track)
         check("cover settles", rig.settle())
-        check("cover url resolved", rig.controller.current is not None and rig.controller.current.cover_url is not None)
+        check(
+            "cover url resolved",
+            rig.controller.current is not None and rig.controller.current.cover_url is not None,
+        )
         check("cover downloaded", rig.wait_cover())
         path = rig.controller.cover_path("1001:7")
         check("cover path set", path is not None)
         check("cover file exists", path is not None and Path(path).exists())
         check("cover in cache dir", path is not None and Path(path).parent == rig.cover_dir)
         check("cover signal", any(item[0] == "cover" and item[1] == "1001:7" for item in rig.events))
-        check("cover metadata updated", rig.controller.current is not None and rig.controller.current.cover_path == path)
-        check("cover file name used", path is not None and Path(path).name == cover_file_name(rig.controller.current.cover_url if rig.controller.current else ""))
+        check(
+            "cover metadata updated",
+            rig.controller.current is not None and rig.controller.current.cover_path == path,
+        )
+        check(
+            "cover file name used",
+            path is not None
+            and Path(path).name
+            == cover_file_name(rig.controller.current.cover_url if rig.controller.current else ""),
+        )
 
         downloads_before = len(rig.cover_downloads)
         rig.controller.play_track(track)
         check("cover reuse settles", rig.settle())
         check("cover not downloaded twice", len(rig.cover_downloads) == downloads_before, rig.cover_downloads)
-        check("cover path prefilled", rig.controller.current is not None and rig.controller.current.cover_path == path)
+        check(
+            "cover path prefilled",
+            rig.controller.current is not None and rig.controller.current.cover_path == path,
+        )
 
         def failing(url: str, target: Path) -> None:
             raise RuntimeError("download failed")
@@ -953,7 +1111,10 @@ def test_stale_stream_and_link_cache(app: QApplication) -> None:
         plays_before = len(rig.engine.plays)
         rig.controller._on_stream_ready(stream_for("1101:7"))
         check("stale link ignored", len(rig.engine.plays) == plays_before)
-        check("stale link keeps current", rig.controller.current is not None and rig.controller.current.id == "1102:7")
+        check(
+            "stale link keeps current",
+            rig.controller.current is not None and rig.controller.current.id == "1102:7",
+        )
 
         rig.controller.play_playlist([make_track(1101)], start_index=0)
         check("link cache settles", rig.settle())
@@ -962,7 +1123,9 @@ def test_stale_stream_and_link_cache(app: QApplication) -> None:
         rig.controller.stop()
         rig.controller.toggle_play()
         check("link cache settles again", rig.settle())
-        check("link cache reused", len(rig.client.download_calls) == downloads_before, rig.client.download_calls)
+        check(
+            "link cache reused", len(rig.client.download_calls) == downloads_before, rig.client.download_calls
+        )
     finally:
         rig.close()
 

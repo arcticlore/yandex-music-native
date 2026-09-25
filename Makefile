@@ -1,4 +1,4 @@
-# yandex-music-linux — GitHub repository Makefile
+# yandex-music-native — GitHub repository Makefile
 #
 #   make run            — dev launch inside .venv (auto-created)
 #   sudo make install   — /usr/bin, /usr/share/applications, /usr/share/icons/hicolor
@@ -17,7 +17,9 @@ VENV_PY     := $(VENV)/bin/python
 VENV_PIP    := $(VENV)/bin/pip
 PIP         ?= $(PYTHON) -m pip
 SRC         := src
-DATA        := data
+PACKAGE     := packaging
+ASSETS      := $(PACKAGE)/icons/hicolor
+METAINFO    := org.arcticlore.YandexMusicNative.metainfo.xml
 DIST        := dist
 
 # system paths (freedesktop / XDG)
@@ -30,7 +32,7 @@ LIBDIR      := $(PREFIX)/lib/$(APP)
 # user-mode mirror
 USER_PREFIX := $(HOME)/.local
 
-.PHONY: all help venv run install install-user uninstall test test-all lint \
+.PHONY: all help venv run install install-user uninstall test test-all lint format \
         build-deb appimage clean distclean deps check
 
 all: run
@@ -41,8 +43,8 @@ help:
 	@echo "  sudo make install  install to $(PREFIX)/..."
 	@echo "  make install-user  install to $(USER_PREFIX)/..."
 	@echo "  sudo make uninstall remove installed files"
-	@echo "  make test | lint | check | build-deb | appimage | clean"
-	@echo "  make test-all      pytest + MPRIS round-trip + live audio pipeline"
+	@echo "  make test | lint | format | check | build-deb | appimage | clean"
+	@echo "  make test-all      pytest + MPRIS round-trip (private session bus)"
 
 # --- venv + run -----------------------------------------------------------
 
@@ -57,7 +59,7 @@ $(VENV_PY):
 deps: $(VENV_PY)
 
 run: $(VENV_PY)
-	@# pass through smoke/CI env if set by caller
+	@# env of the caller (YML_AUDIO_AO, YML_LOG_LEVEL, ...) is passed through
 	$(VENV_PY) $(SRC)/main.py
 
 # --- system install (root) ------------------------------------------------
@@ -67,31 +69,26 @@ run: $(VENV_PY)
 install:
 	install -d "$(DESTDIR)$(BINDIR)"
 	install -d "$(DESTDIR)$(LIBDIR)"
-	cp -a $(SRC)/yamusic "$(DESTDIR)$(LIBDIR)/"
-	find "$(DESTDIR)$(LIBDIR)" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	cp -a $(SRC)/core $(SRC)/ui "$(DESTDIR)$(LIBDIR)/"
 	install -m 0755 $(SRC)/main.py "$(DESTDIR)$(LIBDIR)/main.py"
-	printf '%s\n' '#!/usr/bin/env bash' \
-	  'set -euo pipefail' \
-	  'export PYTHONPATH="$(LIBDIR)$${PYTHONPATH:+:$$PYTHONPATH}"' \
-	  'exec $(PYTHON) "$(LIBDIR)/main.py" "$$@"' \
-	  > "$(DESTDIR)$(BINDIR)/$(APP)"
-	chmod 0755 "$(DESTDIR)$(BINDIR)/$(APP)"
+	find "$(DESTDIR)$(LIBDIR)" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	install -m 0755 $(PACKAGE)/$(APP).sh "$(DESTDIR)$(BINDIR)/$(APP)"
 	install -d "$(DESTDIR)$(APPDIR)"
-	install -m 0644 $(DATA)/$(APP).desktop "$(DESTDIR)$(APPDIR)/$(APP).desktop"
+	install -m 0644 $(PACKAGE)/$(APP).desktop "$(DESTDIR)$(APPDIR)/$(APP).desktop"
 	install -d "$(DESTDIR)$(METAINFODIR)"
-	install -m 0644 packaging/$(APP).metainfo.xml \
-	  "$(DESTDIR)$(METAINFODIR)/org.yamusic.YandexMusicNative.metainfo.xml"
+	install -m 0644 $(PACKAGE)/$(APP).metainfo.xml \
+	  "$(DESTDIR)$(METAINFODIR)/$(METAINFO)"
 	install -d "$(DESTDIR)$(DBUSDIR)"
-	install -m 0644 packaging/dbus/$(APP).service \
+	install -m 0644 $(PACKAGE)/dbus/$(APP).service \
 	  "$(DESTDIR)$(DBUSDIR)/$(APP).service"
 	sed -i 's|/usr/local/bin|$(BINDIR)|' \
 	  "$(DESTDIR)$(DBUSDIR)/$(APP).service" 2>/dev/null || true
 	# hicolor icons (scalable SVG + any prebuilt PNGs)
 	install -d "$(DESTDIR)$(ICONDIR)/scalable/apps"
-	install -m 0644 $(DATA)/icons/$(APP).svg \
+	install -m 0644 $(ASSETS)/scalable/apps/$(APP).svg \
 	  "$(DESTDIR)$(ICONDIR)/scalable/apps/$(APP).svg"
 	@for size in 16 24 32 48 64 128 256; do \
-	  src=packaging/icons/hicolor/$${size}x$${size}/apps/$(APP).png; \
+	  src=$(ASSETS)/$${size}x$${size}/apps/$(APP).png; \
 	  if [ -f "$$src" ]; then \
 	    install -d "$(DESTDIR)$(ICONDIR)/$${size}x$${size}/apps"; \
 	    install -m 0644 "$$src" \
@@ -119,7 +116,7 @@ install-user:
 uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/$(APP)"
 	rm -f "$(DESTDIR)$(APPDIR)/$(APP).desktop"
-	rm -f "$(DESTDIR)$(METAINFODIR)/org.yamusic.YandexMusicNative.metainfo.xml"
+	rm -f "$(DESTDIR)$(METAINFODIR)/$(METAINFO)"
 	rm -f "$(DESTDIR)$(DBUSDIR)/$(APP).service"
 	rm -f "$(DESTDIR)$(ICONDIR)/scalable/apps/$(APP).svg"
 	@for size in 16 24 32 48 64 128 256; do \
@@ -137,19 +134,25 @@ uninstall-user:
 
 # --- quality / packaging --------------------------------------------------
 
-# fast gate: syntax + import/lint errors only (F,E9)
+# fast gate: syntax + import/lint errors only (F,E9) and formatting
 lint:
 	ruff check $(SRC) tests
+	ruff format --check $(SRC) tests
+
+# rewrite files in the canonical style
+format:
+	ruff format $(SRC) tests
 
 # full local gate: same as CI
 test: $(VENV_PY)
-	QT_QPA_PLATFORM=offscreen YAMUSIC_AO=null $(VENV_PY) -m pytest -q
+	QT_QPA_PLATFORM=offscreen YML_AUDIO_AO=null $(VENV_PY) -m pytest -q
 	$(VENV_PY) -m compileall -q $(SRC) tests
 
-# optional extras: MPRIS needs a private session bus, audio pipeline needs mpv+parec
+# optional extra: MPRIS round-trip needs a private session bus
+# (the live PCM→FFT→mpv pipeline already runs inside the pytest gate)
 test-all: test
-	dbus-run-session -- env QT_QPA_PLATFORM=offscreen $(VENV_PY) tests/mpris_selftest.py
-	QT_QPA_PLATFORM=offscreen YAMUSIC_AO=null $(VENV_PY) tests/audio_pipeline.py
+	dbus-run-session -- env QT_QPA_PLATFORM=offscreen YML_AUDIO_AO=null \
+	  $(VENV_PY) tests/mpris_selftest.py
 
 check: lint test
 

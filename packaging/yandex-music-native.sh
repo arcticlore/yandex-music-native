@@ -1,45 +1,37 @@
 #!/usr/bin/env bash
 # System launcher for Yandex Music Native (freedesktop install).
-# Prefers an installed Python package; falls back to repo-relative source.
+#
+# One launcher for every packaging channel: it prefers the sources copied into
+# <prefix>/lib/yandex-music-native, then an installed Python package, then a
+# source checkout next to this script.
 set -euo pipefail
 
-# When installed under PREFIX/lib, sources sit next to this script's real path
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 BIN_DIR="$(dirname "${SELF}")"
-# Check for a sibling lib checkout: ../lib/yandex-music-native/src
-CANDIDATES=(
-  "${BIN_DIR}/../lib/yandex-music-native/src"
-  "/usr/local/lib/yandex-music-native/src"
-  "/usr/lib/yandex-music-native/src"
-)
+PREFIX="$(dirname "${BIN_DIR}")"
+NAME="yandex-music-native"
+LIBRARY="${PREFIX}/lib/${NAME}"
 
-export PYTHONPATH="${PYTHONPATH:-}"
-
-for cand in "${CANDIDATES[@]}"; do
-  if [[ -f "${cand}/yamusic/app.py" ]]; then
-    export PYTHONPATH="${cand}${PYTHONPATH:+:${PYTHONPATH}}"
-    break
-  fi
-done
-
-# Installed package?
-if python3 -c "import yamusic.app" >/dev/null 2>&1; then
-  exec python3 -c "from yamusic.app import main; raise SystemExit(main())" "$@"
+# Sources installed by "make install" / build-deb / PKGBUILD.
+if [[ -f "${LIBRARY}/main.py" ]]; then
+  export PYTHONPATH="${LIBRARY}${PYTHONPATH:+:${PYTHONPATH}}"
+  exec python3 "${LIBRARY}/main.py" "$@"
 fi
 
-# Source tree fallback: walk up from this launcher to a checkout with src/yamusic
-dir="$(cd "${BIN_DIR}" && pwd)"
+# Package installed with "pip install ." → console entry point.
+if python3 -c "import ui.app" >/dev/null 2>&1; then
+  exec python3 -m ui.app "$@"
+fi
+
+# Source checkout: walk up from this launcher to a tree with src/main.py.
+dir="${BIN_DIR}"
 for _ in $(seq 1 6); do
-  if [[ -f "${dir}/src/yamusic/app.py" ]]; then
+  if [[ -f "${dir}/src/main.py" ]]; then
     exec python3 "${dir}/src/main.py" "$@"
   fi
   dir="$(dirname "${dir}")"
 done
 
-# Last resort: PYTHONPATH already set by Makefile install layout
-if [[ -n "${PYTHONPATH}" ]]; then
-  exec python3 -m yamusic "$@"
-fi
-
-echo "yandex-music-native: package not found (pip install or make install)" >&2
+echo "${NAME}: neither ${LIBRARY} nor an installed package was found" >&2
+echo "${NAME}: run 'make install', 'pip install .' or use a source checkout" >&2
 exit 1

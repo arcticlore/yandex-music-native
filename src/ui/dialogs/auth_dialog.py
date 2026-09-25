@@ -215,9 +215,7 @@ class AuthDialog(QDialog):
         self._manual_link.clicked.connect(self._toggle_manual)
         footer.addWidget(self._manual_link)
         footer.addStretch(1)
-        storage = QLabel(
-            f"Токен хранится: {self._storage_label()}"
-        )
+        storage = QLabel(f"Токен хранится: {self._storage_label()}")
         storage.setObjectName("Hint")
         footer.addWidget(storage)
         root.addLayout(footer)
@@ -293,8 +291,7 @@ class AuthDialog(QDialog):
         manual_layout.addWidget(manual_title)
 
         manual_hint = QLabel(
-            "Вставьте access_token из ответа OAuth или строку Cookie — "
-            "приложение само извлечёт токен."
+            "Вставьте access_token из ответа OAuth или строку Cookie — приложение само извлечёт токен."
         )
         manual_hint.setObjectName("Hint")
         manual_hint.setWordWrap(True)
@@ -460,9 +457,7 @@ class AuthDialog(QDialog):
         self._fit_height()
 
     def _toggle_token_visibility(self, checked: bool) -> None:
-        self._token_input.setEchoMode(
-            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-        )
+        self._token_input.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
 
     def _start_browser_login(self) -> None:
         self._manual_error.setVisible(False)
@@ -547,8 +542,11 @@ class AuthDialog(QDialog):
         has_plus = bool(user_data.get("has_plus"))
         self._plus_badge.setText("Яндекс Плюс" if has_plus else "Без подписки")
         self._plus_badge.setStyleSheet(
-            (f"color: #141414; background: {ACCENT};" if has_plus else
-             f"color: {DIM}; background: {ELEVATED}; border: 1px solid {BORDER};")
+            (
+                f"color: #141414; background: {ACCENT};"
+                if has_plus
+                else f"color: {DIM}; background: {ELEVATED}; border: 1px solid {BORDER};"
+            )
             + " border-radius: 10px; padding: 5px 12px; font-weight: 700; font-size: 12px;"
         )
         self._set_status("Вы вошли в аккаунт")
@@ -598,9 +596,7 @@ class AuthDialog(QDialog):
         else:
             self._spinner.stop()
         self._browser_button.setEnabled(not busy)
-        self._browser_button.setText(
-            "Ожидаем браузер…" if busy else "Войти через Яндекс ID"
-        )
+        self._browser_button.setText("Ожидаем браузер…" if busy else "Войти через Яндекс ID")
         self._cancel_button.setVisible(busy)
         self._manual_button.setEnabled(not busy)
         self._token_input.setEnabled(not busy)

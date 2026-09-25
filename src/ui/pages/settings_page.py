@@ -67,9 +67,7 @@ class SettingsPage(QWidget):
         title.setObjectName("PageTitle")
         root.addWidget(title)
 
-        self.visualizer_group = ChipGroup(
-            "Визуализатор", _filtered(VALID_VISUALIZERS, VISUALIZER_CHOICES)
-        )
+        self.visualizer_group = ChipGroup("Визуализатор", _filtered(VALID_VISUALIZERS, VISUALIZER_CHOICES))
         self.quality_group = ChipGroup("Качество", _filtered(VALID_QUALITIES, QUALITY_CHOICES))
         self.theme_group = ChipGroup("Тема", THEME_CHOICES)
         self.tray_group = ChipGroup("Значок в трее", TRAY_CHOICES)

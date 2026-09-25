@@ -417,7 +417,10 @@ def test_stream_link() -> None:
     check("stream link bitrate", link.bitrate == 1411)
     check("stream link track", link.track_id == "42:7")
     check("stream link preview", stream_link("1", FakeVariant("mp3", 192, preview=True)).preview is True)
-    check("stream link explicit url", stream_link("1", variant, "https://other/link").url == "https://other/link")
+    check(
+        "stream link explicit url",
+        stream_link("1", variant, "https://other/link").url == "https://other/link",
+    )
     raises("stream link without getter", RuntimeError, stream_link, "1", object())
     check("stream link dict", stream_link("1", variant).to_dict()["codec"] == "flac")
 
@@ -607,13 +610,24 @@ def test_wave_settings(app: QApplication) -> None:
     service.wave_error.connect(errors.append)
     client.batches = [make_batch([make_track(1, 10), make_track(2, 11)])]
 
-    check("wave with settings submitted", service.start_my_wave(mood="fun", language="ru", diversity="discover") is True)
+    check(
+        "wave with settings submitted",
+        service.start_my_wave(mood="fun", language="ru", diversity="discover") is True,
+    )
     check("settings wave settled", settle(app, service))
     client = client
-    check("settings api call", client.settings_calls == [(WAVE_STATION, "fun", "discover", "russian")], str(client.settings_calls))
+    check(
+        "settings api call",
+        client.settings_calls == [(WAVE_STATION, "fun", "discover", "russian")],
+        str(client.settings_calls),
+    )
     check("settings applied signal", applied == [("fun", "discover", "russian")], str(applied))
     check("settings stored", service.settings() == ("fun", "discover", "russian"), str(service.settings()))
-    check("settings before station request", client.calls.index("rotor_station_settings2") < client.calls.index("rotor_station_tracks"), str(client.calls))
+    check(
+        "settings before station request",
+        client.calls.index("rotor_station_settings2") < client.calls.index("rotor_station_tracks"),
+        str(client.calls),
+    )
     check("settings wave has queue", len(service.queue_snapshot()) == 2)
     check("settings no error", errors == [], str(errors))
     service.shutdown()
@@ -685,11 +699,17 @@ def test_queue_navigation(app: QApplication) -> None:
 
     check("track_played reports finished", service.track_played(played_seconds=170.0) is True)
     settle(app, service)
-    check("track_played event", client.feedback_calls[-1]["type"] == FEEDBACK_TRACK_PLAYED, str(client.feedback_calls[-1]))
+    check(
+        "track_played event",
+        client.feedback_calls[-1]["type"] == FEEDBACK_TRACK_PLAYED,
+        str(client.feedback_calls[-1]),
+    )
     check("track_played track id", client.feedback_calls[-1]["track_id"] == "4:104")
     check("track_played once", service.track_played(played_seconds=170.0) is False)
     settle(app, service)
-    check("track_played no duplicate", len(client.feedback_calls) == before + 3, str(len(client.feedback_calls)))
+    check(
+        "track_played no duplicate", len(client.feedback_calls) == before + 3, str(len(client.feedback_calls))
+    )
 
     events.clear()
     back = service.previous_track()
@@ -941,12 +961,17 @@ def test_streams(app: QApplication) -> None:
     check("stream lossless codec", links[-1].codec == "flac", str(links[-1]))
     check("stream lossless flag", links[-1].lossless is True)
 
-    check("stream denied lossless", service.stream_url(quality=QUALITY_LOSSLESS, allow_lossless=False) is True)
+    check(
+        "stream denied lossless", service.stream_url(quality=QUALITY_LOSSLESS, allow_lossless=False) is True
+    )
     settle(app, service)
     check("stream denied codec", links[-1].codec == "mp3" and links[-1].bitrate == 320)
 
     for key in list(service._stream_cache):
-        service._stream_cache[key] = (time.monotonic() - STREAM_CACHE_TTL_S - 1, service._stream_cache[key][1])
+        service._stream_cache[key] = (
+            time.monotonic() - STREAM_CACHE_TTL_S - 1,
+            service._stream_cache[key][1],
+        )
     check("expired cache miss", service.cached_stream(current, QUALITY_HIGH) is None)
     check("expired stream refetch", service.stream_url(quality=QUALITY_HIGH) is True)
     settle(app, service)

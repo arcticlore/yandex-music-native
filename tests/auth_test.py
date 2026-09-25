@@ -292,9 +292,11 @@ def test_browser_flow_no_token(app: QCoreApplication) -> None:
         observed["busy"] = svc.is_busy
         return None, "timeout"
 
-    with mock.patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True), \
-         mock.patch.object(svc._state, "wait", side_effect=fake_wait), \
-         mock.patch.dict(os.environ, {"YML_OAUTH_CLIENT_ID": "custom-client-123"}):
+    with (
+        mock.patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True),
+        mock.patch.object(svc._state, "wait", side_effect=fake_wait),
+        mock.patch.dict(os.environ, {"YML_OAUTH_CLIENT_ID": "custom-client-123"}),
+    ):
         check("login_via_browser started", svc.login_via_browser() is True)
         deadline = time.time() + 5
         while time.time() < deadline and not finished:
@@ -329,9 +331,11 @@ def test_browser_flow_delivers_token(app: QCoreApplication) -> None:
     received: list[dict] = []
     svc.auth_success.connect(received.append)
     fake_client = _fake_client("tok")
-    with mock.patch("yandex_music.Client", return_value=fake_client), \
-         mock.patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True), \
-         mock.patch.dict(os.environ, {"YML_OAUTH_CLIENT_ID": "custom-client-123"}):
+    with (
+        mock.patch("yandex_music.Client", return_value=fake_client),
+        mock.patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True),
+        mock.patch.dict(os.environ, {"YML_OAUTH_CLIENT_ID": "custom-client-123"}),
+    ):
         check("browser login started", svc.login_via_browser() is True)
         base = f"http://{CALLBACK_HOST}:{CALLBACK_PORT}"
         token = "browser-flow-token-123"
@@ -367,8 +371,10 @@ def test_device_flow_cancel_stops_polling(app: QCoreApplication) -> None:
     fake_client.request_device_code.return_value = device_code
     fake_client.poll_device_token.return_value = None
 
-    with mock.patch("yandex_music.Client", return_value=fake_client), \
-         mock.patch.object(svc, "_open_browser", return_value=True):
+    with (
+        mock.patch("yandex_music.Client", return_value=fake_client),
+        mock.patch.object(svc, "_open_browser", return_value=True),
+    ):
         svc.login_via_browser()
         deadline = time.time() + 5
         while time.time() < deadline and svc.user_code is None:
@@ -438,8 +444,10 @@ def test_device_flow(app: QCoreApplication) -> None:
     fake_client.request_device_code.return_value = device_code
     fake_client.poll_device_token.side_effect = [None, oauth_token]
 
-    with mock.patch("yandex_music.Client", return_value=fake_client), \
-         mock.patch.object(svc, "_open_browser", return_value=True):
+    with (
+        mock.patch("yandex_music.Client", return_value=fake_client),
+        mock.patch.object(svc, "_open_browser", return_value=True),
+    ):
         check("device flow started", svc.login_via_browser() is True)
         check("device flow busy", svc.is_busy is True)
         deadline = time.time() + 20
@@ -453,7 +461,10 @@ def test_device_flow(app: QCoreApplication) -> None:
         svc.confirmation_url == "https://oauth.yandex.ru/device?code=123456",
         svc.confirmation_url,
     )
-    check("device request params", fake_client.request_device_code.call_args.kwargs["device_name"] == "yandex-music-linux")
+    check(
+        "device request params",
+        fake_client.request_device_code.call_args.kwargs["device_name"] == "yandex-music-linux",
+    )
     check("device polled", fake_client.poll_device_token.call_count == 2)
     check("device auth_success", len(received) == 1, str(received))
     check("device token saved", svc.token == "device-flow-token-xyz")
@@ -475,8 +486,10 @@ def test_device_flow_error(app: QCoreApplication) -> None:
     svc.auth_error.connect(errors.append)
     fake_client = mock.Mock()
     fake_client.request_device_code.side_effect = DeviceAuthError("invalid_client")
-    with mock.patch("yandex_music.Client", return_value=fake_client), \
-         mock.patch.object(svc, "_open_browser", return_value=True):
+    with (
+        mock.patch("yandex_music.Client", return_value=fake_client),
+        mock.patch.object(svc, "_open_browser", return_value=True),
+    ):
         svc.login_via_browser()
         deadline = time.time() + 5
         while time.time() < deadline and not errors:
@@ -512,10 +525,12 @@ def test_dialog(app: QApplication) -> None:
     dialog._show_token.setChecked(False)
     check("token echo hidden", dialog._token_input.echoMode().name == "Password")
 
-    with mock.patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True), \
-         mock.patch.object(AuthService, "validate_token", side_effect=AssertionError("no network")), \
-         mock.patch.object(dialog._auth, "_open_browser", return_value=True), \
-         mock.patch.dict(os.environ, {"YML_OAUTH_CLIENT_ID": "custom-client-123"}):
+    with (
+        mock.patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True),
+        mock.patch.object(AuthService, "validate_token", side_effect=AssertionError("no network")),
+        mock.patch.object(dialog._auth, "_open_browser", return_value=True),
+        mock.patch.dict(os.environ, {"YML_OAUTH_CLIENT_ID": "custom-client-123"}),
+    ):
         dialog._browser_button.click()
         check("browser click starts flow", dialog._browser_button.isEnabled() is False)
         check("spinner on click", dialog._spinner.is_spinning() is True)
@@ -631,12 +646,14 @@ def test_dialog_layout(app: QApplication) -> None:
     check("user label has height", dialog._user_name.height() >= 20, str(dialog._user_name.height()))
     check("plus badge has height", dialog._plus_badge.height() >= 20, str(dialog._plus_badge.height()))
     dialog._on_plus_warning(
-        "Активной подписки Яндекс Плюс не найдено: треки без подписки "
-        "воспроизводятся только 30 секунд."
+        "Активной подписки Яндекс Плюс не найдено: треки без подписки воспроизводятся только 30 секунд."
     )
     settle()
     problems += audit("success+warning")
-    check("warning not clipped", dialog._warning.height() >= dialog._warning.heightForWidth(dialog._warning.width()))
+    check(
+        "warning not clipped",
+        dialog._warning.height() >= dialog._warning.heightForWidth(dialog._warning.width()),
+    )
     dialog._logout()
     settle()
     problems += audit("logout")

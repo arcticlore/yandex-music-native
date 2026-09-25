@@ -257,9 +257,7 @@ def spectrum_bands(
     loudness = float(np.clip((peak + 72.0) / 66.0, 0.0, 1.0))
     relative = np.clip((decibels - peak + 54.0) / 54.0, 0.0, 1.0)
     tilt = np.linspace(0.0, 0.12, n_bands, dtype=np.float32)
-    return np.clip(relative * (0.15 + 0.85 * loudness) * (1.0 + tilt), 0.0, 1.0).astype(
-        np.float32
-    )
+    return np.clip(relative * (0.15 + 0.85 * loudness) * (1.0 + tilt), 0.0, 1.0).astype(np.float32)
 
 
 def oscilloscope(block: np.ndarray, points: int = WAVE_POINTS) -> np.ndarray:
@@ -391,9 +389,7 @@ class _MonitorTap:
             log.warning("parec start failed: %s", exc)
             self._proc = None
             return False
-        self._thread = threading.Thread(
-            target=self._loop, name="pcm-monitor", daemon=True
-        )
+        self._thread = threading.Thread(target=self._loop, name="pcm-monitor", daemon=True)
         self._thread.start()
         log.debug("monitor tap on %s.monitor", sink)
         return True
@@ -629,9 +625,7 @@ class AudioEngine(QObject):
         self._envelope = Envelope(self._bands)
         self._consumers: list[Callable[[np.ndarray, int], None]] = []
 
-        self._tap = create_tap(
-            self._on_pcm, mode=tap_mode, rate=self._sample_rate, channels=self._channels
-        )
+        self._tap = create_tap(self._on_pcm, mode=tap_mode, rate=self._sample_rate, channels=self._channels)
         self._player = self._create_player(mpv, ao=ao, hwaccel=hwaccel)
         self._wire_events()
 
@@ -1015,9 +1009,7 @@ class AudioEngine(QObject):
         if block is None:
             return
         try:
-            bands = self._envelope.update(
-                spectrum_bands(block, self._sample_rate, self._bands)
-            )
+            bands = self._envelope.update(spectrum_bands(block, self._sample_rate, self._bands))
             wave = oscilloscope(block)
         except Exception:
             log.exception("analyzer failed")

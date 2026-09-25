@@ -424,9 +424,7 @@ class PlaybackController(QObject):
         if QueueMode(mode) != QueueMode.RADIO:
             log.info("start_wave called with mode %s, using radio", mode)
         try:
-            station.resolve_settings(
-                mood=mood, activity=activity, language=language, diversity=diversity
-            )
+            station.resolve_settings(mood=mood, activity=activity, language=language, diversity=diversity)
         except ValueError as exc:
             self.wave_error.emit(str(exc))
             return False
@@ -437,9 +435,7 @@ class PlaybackController(QObject):
         self._engine.stop()
         self._set_buffering(True)
         self._emit_queue()
-        self._emit_settings(
-            mood=mood, activity=activity, language=language, diversity=diversity
-        )
+        self._emit_settings(mood=mood, activity=activity, language=language, diversity=diversity)
         return self._service.start_my_wave(
             mood=mood, activity=activity, language=language, diversity=diversity
         )

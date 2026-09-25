@@ -118,9 +118,7 @@ class ConfigManager:
 
     def _atomic_write(self, payload: dict[str, Any]) -> None:
         self._ensure_dir()
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".config-", suffix=".tmp", dir=str(self._dir)
-        )
+        fd, tmp_name = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=str(self._dir))
         try:
             os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:

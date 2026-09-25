@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Entry point for yandex-music-linux.
+"""Entry point for yandex-music-native.
 
 Works when executed as ``python src/main.py`` from a checkout (bootstraps
-``src/`` onto ``sys.path``) and when installed as a console script.
+``src/`` onto ``sys.path``) and when installed as a console script: the
+application is the ``core`` (services, audio, desktop) plus ``ui`` (PySide6
+shell) stack started by :func:`ui.app.main`.
 """
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -21,10 +22,6 @@ def _bootstrap_path() -> None:
 
 def main() -> int:
     _bootstrap_path()
-    if os.environ.get("YML_LEGACY") == "1":
-        from yamusic.app import main as _legacy_main
-
-        return _legacy_main()
     from ui.app import main as _app_main
 
     return _app_main()

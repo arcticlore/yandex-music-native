@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("YAMUSIC_AO", "null")
+os.environ.setdefault("YML_AUDIO_AO", "null")
 os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="yml-ui-config-")
 os.environ["XDG_CACHE_HOME"] = tempfile.mkdtemp(prefix="yml-ui-cache-")
 
@@ -202,8 +202,10 @@ def test_wave_smoother_and_fitters() -> None:
     check("bands truncated", len(fit_bands([0.1] * 10, 3)) == 3)
     check("wave padded", fit_wave([0.5], 3) == [0.5, 0.0, 0.0])
     check("wave clipped", fit_wave([2.0, -3.0], 2) == [1.0, -1.0])
-    check("idle bounded", all(0.0 <= idle_target(i, 16, 0.5) <= station.WAVE_MOODS.__len__() * 0.01
-                              for i in range(16)))
+    check(
+        "idle bounded",
+        all(0.0 <= idle_target(i, 16, 0.5) <= station.WAVE_MOODS.__len__() * 0.01 for i in range(16)),
+    )
     check("idle zero size", idle_target(0, 0, 0.0) == 0.0)
 
 
@@ -503,7 +505,9 @@ def test_search_results_conversion() -> None:
     check("liked tracks", liked_items("tracks", SimpleNamespace(tracks=[make_track(41)]))[0].liked)
     check(
         "liked albums",
-        isinstance(liked_items("albums", SimpleNamespace(albums=[SimpleNamespace(id=1, title="A")]))[0], CatalogItem),
+        isinstance(
+            liked_items("albums", SimpleNamespace(albums=[SimpleNamespace(id=1, title="A")]))[0], CatalogItem
+        ),
     )
     check("to_dict", set(results.to_dict()) == {"query", "tracks", "albums", "artists", "playlists"})
     check("dataclass type", isinstance(results, SearchResults))
