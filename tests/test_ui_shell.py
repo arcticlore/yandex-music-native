@@ -40,6 +40,7 @@ from core.playback_controller import PlaybackState, QueueMode  # noqa: E402
 from core.yandex_service import (  # noqa: E402
     CatalogItem,
     SearchResults,
+    _iter_section,
     liked_items,
     search_results,
 )
@@ -2066,3 +2067,137 @@ def test_wave_page_and_window_take_a_numpy_frame(app: QApplication, config: Conf
         window.close()
     finally:
         rig.close()
+
+
+# -- the real API response shapes -------------------------------------------
+#
+# These use the installed yandex-music models rather than stand-ins, because the
+# stand-ins hid the bug: a SimpleNamespace whose attribute is a list behaves like
+# nothing the library ever returns.
+
+
+def _real_block(kind: str, items: list) -> object:
+    from yandex_music import SearchResult
+
+    return SearchResult(type=kind, total=len(items), per_page=len(items), order=0, results=items)
+
+
+def _real_search(**sections) -> object:
+    from yandex_music import Search
+
+    empty = _real_block("album", [])
+    fields = {
+        "search_request_id": "req",
+        "text": "q",
+        "best": None,
+        "tracks": empty,
+        "albums": empty,
+        "artists": empty,
+        "playlists": empty,
+        "videos": empty,
+        "users": empty,
+        "podcasts": empty,
+        "podcast_episodes": empty,
+        "type": "all",
+        "page": 0,
+        "per_page": 20,
+    }
+    fields.update(sections)
+    return Search(**fields)
+
+
+def test_iter_section_reads_a_real_search_block() -> None:
+    """A SearchResult is not a sequence, and list() on one raises."""
+    from yandex_music import Album, Artist, Playlist, Track
+
+    track = Track(id="1", title="Первый", duration_ms=1000)
+    album = Album(id="2", title="Альбом")
+    artist = Artist(id="3", name="Исполнитель")
+    playlist = Playlist(
+        owner=None,
+        cover=None,
+        made_for=None,
+        play_counter=None,
+        playlist_absence=None,
+        uid=4,
+        kind=1013,
+        title="Плейлист",
+        track_count=3,
+    )
+
+    block = _real_block("track", [track])
+    check("the block is not iterable as a sequence", not isinstance(block, (list, tuple)))
+    try:
+        list(block)
+        raised = False
+    except KeyError:
+        raised = True
+    check("and list() on it really does raise KeyError", raised)
+    check("the entries are under .results", _iter_section(block, "results") == [track])
+
+    raw = _real_search(
+        tracks=_real_block("track", [track]),
+        albums=_real_block("album", [album]),
+        artists=_real_block("artist", [artist]),
+        playlists=_real_block("playlist", [playlist]),
+    )
+    results = search_results("q", raw)
+    check("the search tracks came through", [item.title for item in results.tracks] == ["Первый"])
+    check("the search albums came through", [item.title for item in results.albums] == ["Альбом"])
+    check("the search artists came through", [item.title for item in results.artists] == ["Исполнитель"])
+    check("the search playlists came through", [item.title for item in results.playlists] == ["Плейлист"])
+    check("the counts add up", results.total == 4)
+
+    # An absent block is an empty tab, not a crash.
+    missing = search_results("q", _real_search(tracks=None, albums=None))
+    check("a missing track block is empty", missing.tracks == ())
+    check("a missing album block is empty", missing.albums == ())
+    check("and the page is not marked empty overall", missing.total == 0)
+
+
+def test_liked_sections_read_the_bare_list_users_likes_returns() -> None:
+    """users_likes_albums answers with a list, not a model with a list on it."""
+    from yandex_music import Album, Artist, Playlist
+
+    album = Album(id="2", title="Альбом")
+    artist = Artist(id="3", name="Исполнитель")
+    playlist = Playlist(
+        owner=None,
+        cover=None,
+        made_for=None,
+        play_counter=None,
+        playlist_absence=None,
+        uid=4,
+        kind=1013,
+        title="Плейлист",
+        track_count=7,
+    )
+
+    check("the liked albums are read", [item.title for item in liked_items("albums", [album])] == ["Альбом"])
+    check(
+        "the liked artists are read",
+        [item.title for item in liked_items("artists", [artist])] == ["Исполнитель"],
+    )
+    check(
+        "the liked playlists are read",
+        [item.title for item in liked_items("playlists", [playlist])] == ["Плейлист"],
+    )
+    check("an empty list is an empty tab", liked_items("albums", []) == ())
+
+    # The shape hydrate_liked_tracks builds is a dict of lists, and the shape
+    # the old tests used (an attribute holding a list) still has to work.
+    from core.yandex_service import hydrate_liked_tracks
+
+    track = make_track(41)
+    payload = hydrate_liked_tracks(SimpleNamespace(tracks=lambda ids: [track]), {"tracks": [track]})
+    check("the hydrated payload is a dict of lists", isinstance(payload, dict))
+    check(
+        "and the liked tracks are read from it",
+        [item.title for item in liked_items("tracks", payload)] == [track.title],
+    )
+    check(
+        "a namespaced list still works",
+        [item.title for item in liked_items("albums", SimpleNamespace(albums=[album]))] == ["Альбом"],
+    )
+    # A block is not a liked response, but it must not raise if one ever is.
+    check("a block does not raise", liked_items("albums", _real_block("album", [album])) == ())

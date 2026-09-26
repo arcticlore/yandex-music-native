@@ -501,10 +501,38 @@ LIKED_SECTIONS = ("tracks", "albums", "artists", "playlists")
 
 
 def _iter_section(raw: Any, name: str) -> list[Any]:
-    section = getattr(raw, name, None)
-    if section is None and isinstance(raw, dict):
-        section = raw.get(name)
-    return list(section or ())
+    """Pull one result block out of an API response, whatever shape it has.
+
+    Three shapes reach this function, and not one of them is what a plain
+    ``list()`` accepts:
+
+    * a ``Search`` model, whose ``tracks``/``albums``/... are ``SearchResult``
+      objects rather than sequences.  The library models are subscriptable, so
+      ``list()`` falls back to ``__getitem__(0)`` and comes back with
+      ``KeyError: 0`` from ``__dict__[0]``;
+    * a block, model or dict, with the entries under ``results``;
+    * a bare list, which is what ``users_likes_albums`` and its siblings return:
+      the response *is* the section, and asking a list for a ``tracks``
+      attribute would leave the liked albums tab silently empty.
+
+    Anything else yields no entries, so a response nobody anticipated empties a
+    tab instead of taking the whole tab down.
+    """
+    if raw is None:
+        return []
+    # The bare sequence comes first: a list has no attributes, and looking for
+    # ``name`` on it would send the liked tabs down an always-empty path.
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    section = raw.get(name) if isinstance(raw, dict) else getattr(raw, name, None)
+    if section is None:
+        return []
+    if isinstance(section, (list, tuple)):
+        return list(section)
+    results = section.get("results") if isinstance(section, dict) else getattr(section, "results", None)
+    if results is None:
+        return []
+    return list(results)
 
 
 def search_results(query: str, raw: Any, generation: int = 0) -> SearchResults:
