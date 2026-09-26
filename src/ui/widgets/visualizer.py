@@ -147,7 +147,13 @@ def update_peaks(peaks: Sequence[float], values: Sequence[float], fall: float) -
 
 
 def fit_bands(values: Sequence[float], size: int = DEFAULT_BANDS) -> list[float]:
-    """Pad or truncate an FFT frame to exactly ``size`` values in ``[0, 1]``."""
+    """Pad or truncate an FFT frame to exactly ``size`` values in ``[0, 1]``.
+
+    A missing frame is silence: the engine can publish nothing when a stream
+    stalls, and an empty meter is the right answer to that, not a traceback.
+    """
+    if values is None:
+        values = []
     clipped = [clamp(float(value)) for value in values[:size]]
     if len(clipped) < size:
         clipped.extend([0.0] * (size - len(clipped)))
@@ -155,7 +161,12 @@ def fit_bands(values: Sequence[float], size: int = DEFAULT_BANDS) -> list[float]
 
 
 def fit_wave(values: Sequence[float], size: int = WAVE_POINTS) -> list[float]:
-    """Pad or truncate a waveform frame to exactly ``size`` values."""
+    """Pad or truncate a waveform frame to exactly ``size`` values.
+
+    ``None`` is silence here for the same reason as in :func:`fit_bands`.
+    """
+    if values is None:
+        values = []
     clipped = [max(-1.0, min(1.0, float(value))) for value in values[:size]]
     if len(clipped) < size:
         clipped.extend([0.0] * (size - len(clipped)))
@@ -456,6 +467,8 @@ def frame_rms(values: Sequence[float]) -> float:
     broken.  The average power is what a listener perceives as loudness, and it
     is the number a mixing desk shows.
     """
+    if values is None:
+        return 0.0
     count = len(values)
     if count == 0:
         return 0.0
@@ -474,7 +487,11 @@ def channel_levels(values: Sequence[float], channels: int = 2) -> list[float]:
     sample by one; the tail sample is counted into the last channel instead.
     """
     total = max(1, int(channels))
-    if not values:
+    # ``if not values`` looks harmless and is not: the engine hands over a
+    # numpy array, and the truth value of a multi-element array raises
+    # ValueError instead of answering. Comparing against None and asking for
+    # the length works for every sequence that has one, arrays included.
+    if values is None or len(values) == 0:
         return [VU_FLOOR] * total
     samples = [float(value) for value in values]
     buckets: list[list[float]] = [[] for _ in range(total)]

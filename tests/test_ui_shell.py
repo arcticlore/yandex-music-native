@@ -1979,3 +1979,90 @@ def test_a_refused_collection_load_is_retried(app: QApplication, config: ConfigM
         page.deleteLater()
     finally:
         rig.close()
+
+
+# -- numpy frames must not raise --------------------------------------------
+#
+# The engine publishes its FFT and waveform frames as numpy arrays.  A bare
+# ``if not values`` on one of those raises ValueError instead of answering, so
+# every entry point that takes a frame is exercised here with a real ndarray:
+# a zero-length one (which is the case that used to crash) and a full one.
+
+
+def test_channel_levels_survives_a_numpy_frame() -> None:
+    """The length check must be a length, not a truth test."""
+    import numpy as np
+
+    from ui.widgets.visualizer import VU_CHANNELS, channel_levels
+
+    silent = np.zeros(512, dtype=np.float32)
+    check("a full array of silence reads as the floor", channel_levels(silent) == [0.0] * VU_CHANNELS)
+
+    loud = np.linspace(-1.0, 1.0, 512, dtype=np.float32)
+    stereo = channel_levels(loud)
+    check("a full array gives one level per channel", len(stereo) == VU_CHANNELS)
+    check("and every level is in range", all(0.0 <= level <= 1.0 for level in stereo))
+
+    empty = np.zeros(0, dtype=np.float32)
+    check("an empty array is silence, not a crash", channel_levels(empty) == [0.0] * VU_CHANNELS)
+
+    check("None is silence too", channel_levels(None) == [0.0] * VU_CHANNELS)
+    check("a one-channel request still works", channel_levels(loud, 1) != [])
+    check("and a zero-channel request cannot divide by zero", len(channel_levels(loud, 0)) == 1)
+
+
+def test_visualizers_accept_numpy_frames() -> None:
+    """set_waveform, set_spectrum and the stack must all take a real array."""
+    import numpy as np
+
+    from ui.widgets.visualizer import VisualizerStack, channel_levels, fit_bands, fit_wave
+
+    stack = VisualizerStack()
+    stack.resize(300, 220)
+    try:
+        for values in (
+            np.zeros(512, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+            np.zeros(1024, dtype=np.float32),
+        ):
+            stack.set_waveform(values)
+            stack.set_spectrum(values)
+            check("a numpy waveform frame is accepted", len(fit_wave(values)) > 0)
+            check("a numpy spectrum frame is accepted", len(fit_bands(values)) > 0)
+            check("a numpy frame gives channel levels", len(channel_levels(values)) > 0)
+        for mode in ("spectrum", "wave", "circular", "meters"):
+            stack.set_mode(mode)
+            stack.set_waveform(np.zeros(512, dtype=np.float32))
+            stack.set_spectrum(np.zeros(512, dtype=np.float32))
+            stack.current.advance()
+            check(
+                f"{mode} paints after a numpy frame",
+                not stack.current.grab().isNull() and stack.current.grab().width() > 0,
+            )
+        check("None is accepted as silence", stack.set_waveform(None) is None)
+        stack.set_idle()
+        stack.current.advance()
+        check("and idle still paints", not stack.current.grab().isNull())
+    finally:
+        stack.stop_all()
+        stack.deleteLater()
+
+
+def test_wave_page_and_window_take_a_numpy_frame(app: QApplication, config: ConfigManager) -> None:
+    """The two real callers must survive the array the engine actually sends."""
+    import numpy as np
+
+    rig = Rig(app)
+    try:
+        rig.login()
+        window = MainWindow(rig.controller, config)
+        frame = np.zeros(512, dtype=np.float32)
+        check("the page takes the array", window.wave_page.feed_waveform(frame) is None)
+        window._on_waveform(frame)
+        check("and so does the window", True)
+        window._on_fft(np.zeros(256, dtype=np.float32))
+        check("the fft path is fine too", True)
+        check("the stage still paints", not window.wave_page.grab().isNull())
+        window.close()
+    finally:
+        rig.close()
