@@ -1,4 +1,4 @@
-"""Audio visualizers: bars, neon wave and a radial spectrum around the cover.
+"""Audio visualizers: bars, neon wave and the glowing radial stage.
 
 The engine publishes spectrum and waveform frames from
 :mod:`core.audio_engine`; this module turns them into something that can be
@@ -11,6 +11,9 @@ watched. Three details matter for a stable 60 FPS picture:
 * the repaint clock is a single 16 ms timer that is stopped while the widget is
   hidden, so a minimised window costs nothing.
 
+Any style can be swapped for the next one with a click, which is why every
+visualizer forwards :attr:`VisualizerBase.mode_clicked` to the stack.
+
 The smoothing maths lives in plain functions and lists, independent of Qt, so it
 can be tested without a running application.
 """
@@ -20,7 +23,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QConicalGradient,
@@ -29,8 +32,11 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QRadialGradient,
 )
 from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+from ui.theme import ACCENT, BORDER, PANEL, SURFACE, TEXT, WAVE_PINK
 
 FRAME_INTERVAL_MS = round(1000 / 60)
 DEFAULT_BANDS = 64
@@ -38,14 +44,19 @@ WAVE_POINTS = 512
 DEFAULT_ATTACK = 0.62
 DEFAULT_RELEASE = 0.12
 DEFAULT_PEAK_FALL = 0.014
-BACKGROUND = QColor("#0f0f13")
-BASELINE = QColor("#2a2a36")
-ACCENT_LOW = QColor("#ff4d82")
+BACKGROUND = QColor(PANEL)
+BASELINE = QColor(BORDER)
+ACCENT_LOW = QColor(WAVE_PINK)
+# The spectrum heat ramp is the wave page's own look and stays local: only the
+# frame around it (panel, baseline, peak cap) comes from the shared tokens.
 ACCENT_MID = QColor("#ff8c42")
-ACCENT_HIGH = QColor("#ffdb4d")
-PEAK_COLOR = QColor(240, 240, 250, 210)
+ACCENT_HIGH = QColor(ACCENT)
+PEAK_COLOR = QColor(TEXT)
+PEAK_COLOR.setAlpha(210)
 IDLE_LEVEL = 0.045
 IDLE_SPEED = 0.0016
+MODE_ORDER = ("circular", "spectrum", "wave")
+"""The order a click walks through, starting at the stage's own style."""
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -239,11 +250,14 @@ class VisualizerBase(QWidget):
     """Data plumbing plus the 60 FPS repaint clock shared by all styles."""
 
     mode = "spectrum"
+    mode_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None, bands: int = DEFAULT_BANDS) -> None:
         super().__init__(parent)
         self.setMinimumHeight(140)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Сменить визуализатор")
         self._spectrum = Smoother(bands)
         self._wave = WaveSmoother()
         self._target_bands: list[float] = [0.0] * bands
@@ -329,6 +343,11 @@ class VisualizerBase(QWidget):
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
         self.stop()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        """A click anywhere on the stage asks the stack for the next style."""
+        super().mousePressEvent(event)
+        self.mode_clicked.emit()
 
     def _tick(self) -> None:
         self.advance()
@@ -427,62 +446,147 @@ class WaveVisualizer(VisualizerBase):
         painter.drawLine(0, height - 1, width, height - 1)
 
 
+def ray_gradient(center: QPointF, angle: float, alpha: int) -> QConicalGradient:
+    """The gold-to-pink sweep the rays ride on, dimmed to ``alpha``.
+
+    A single conic gradient spans the whole stage, so neighbouring rays meet in
+    one continuous sweep of colour instead of each carrying its own ramp; the
+    wide pass of a ray is the same gradient at a low alpha, which is what turns
+    a line into light.
+    """
+    gradient = QConicalGradient(center, angle)
+    for position, colour in ((0.0, ACCENT_HIGH), (0.34, ACCENT_MID), (0.68, ACCENT_LOW), (1.0, ACCENT_HIGH)):
+        tinted = QColor(colour)
+        tinted.setAlpha(alpha)
+        gradient.setColorAt(position, tinted)
+    return gradient
+
+
 class RadialVisualizer(VisualizerBase):
-    """Radial spectrum drawn around the current cover art."""
+    """The wave page's own look: a lit core with neon rays around it.
+
+    A soft halo sits under the album art, and every band becomes one ray that
+    starts at the edge of the disc and reaches out into the dark. Each ray is
+    drawn twice - a wide, low-alpha pass and a thin, bright one - so the burst
+    glows instead of looking like a star chart, and the whole fan turns slowly so
+    the stage still lives while nothing is playing.
+    """
 
     mode = "circular"
+    CORE_RATIO = 0.5
+    """The album art disc, as a fraction of the half-height."""
+    RAY_INSET = 1.04
+    """Where a ray starts, just outside the disc."""
+    RAY_REACH = 0.66
+    """How far the loudest band reaches, as a fraction of the half-height."""
+    RAY_STEPS = 2
+    """Two passes: the glow, then the core."""
+    SPIN = 0.00042
+    """Rotation per frame, so the sweep never freezes into a static starburst."""
 
     def __init__(self, parent: QWidget | None = None, bands: int = DEFAULT_BANDS) -> None:
         super().__init__(parent, bands)
         self._cover: QPixmap | None = None
+        self._rotation = 0.0
 
     def set_cover(self, pixmap: QPixmap | None) -> None:
-        """Draw the cover in the middle of the ring."""
+        """Draw the cover in the middle of the stage."""
         self._cover = pixmap
         self.update()
 
     def clear_cover(self) -> None:
         self.set_cover(None)
 
+    def advance(self) -> None:
+        super().advance()
+        self._rotation = (self._rotation + self.SPIN) % 1.0
+
     def _paint(self, painter: QPainter) -> None:
         values = self._spectrum.values
         count = len(values)
         if count == 0:
             return
-        width = self.width()
         height = self.height()
+        width = self.width()
         center = QPointF(width / 2.0, height / 2.0)
-        radius = max(24.0, min(width, height) / 2.0 - 26.0)
-        thickness = max(4.0, radius * 0.14)
-        start_angle = 90 * 16
-        span = 360 * 16 / count
-        gradient = QConicalGradient(center, -90)
-        gradient.setColorAt(0.0, ACCENT_HIGH)
-        gradient.setColorAt(0.5, ACCENT_MID)
-        gradient.setColorAt(1.0, ACCENT_LOW)
-        painter.setPen(QPen(gradient, thickness, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        for index, value in enumerate(values):
-            length = radius + thickness / 2.0 + value * (radius * 0.55)
-            angle = (start_angle + index * span) % (360 * 16)
-            painter.drawLine(
-                center,
-                QPointF(
-                    center.x() + length * math.cos(math.radians(angle / 16.0)),
-                    center.y() + length * math.sin(math.radians(angle / 16.0)),
-                ),
+        limit = min(width, height) / 2.0
+        disc = max(20.0, limit * self.CORE_RATIO)
+        spin = -90.0 + self._rotation * 360.0
+        inner = disc * self.RAY_INSET
+        reach = (limit - inner) * self.RAY_REACH * 1.5
+        self._paint_halo(painter, center, limit)
+        self._paint_rays(painter, center, values, inner, reach, spin)
+        self._paint_core(painter, center, disc, spin)
+
+    def _paint_halo(self, painter: QPainter, center: QPointF, limit: float) -> None:
+        """A wide soft gradient that lights the middle of the stage."""
+        extent = limit * 0.92
+        halo = QRadialGradient(center, extent)
+        for position, colour, alpha in ((0.0, ACCENT_HIGH, 105), (0.5, ACCENT_MID, 40), (1.0, ACCENT_LOW, 0)):
+            tinted = QColor(colour)
+            tinted.setAlpha(alpha)
+            halo.setColorAt(position, tinted)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(halo)
+        painter.drawEllipse(center, extent, extent)
+
+    def _paint_rays(
+        self,
+        painter: QPainter,
+        center: QPointF,
+        values: Sequence[float],
+        inner: float,
+        reach: float,
+        spin: float,
+    ) -> None:
+        """The burst: one ray per band, glow pass first, then the bright core."""
+        count = len(values)
+        if count == 0:
+            return
+        span = math.tau / count
+        angle0 = math.radians(spin)
+        passes = ((7.0, 46), (2.0, 235))
+        for thickness, alpha in passes:
+            painter.setPen(
+                QPen(
+                    ray_gradient(center, spin, alpha),
+                    thickness,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                )
             )
+            for index, value in enumerate(values):
+                angle = angle0 + index * span
+                length = inner + max(0.0, min(1.0, value)) * reach
+                painter.drawLine(
+                    center,
+                    QPointF(center.x() + length * math.cos(angle), center.y() + length * math.sin(angle)),
+                )
+
+    def _paint_core(self, painter: QPainter, center: QPointF, disc: float, spin: float) -> None:
+        """The album art as a disc, or a soft accent ball when there is none."""
+        path = QPainterPath()
+        path.addEllipse(center, disc, disc)
         if self._cover is not None and not self._cover.isNull():
-            side = int(radius * 1.5)
-            painter.drawPixmap(
-                int(center.x() - side / 2),
-                int(center.y() - side / 2),
-                self._cover.scaled(
-                    side,
-                    side,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                ),
+            art = self._cover.scaled(
+                int(disc * 2),
+                int(disc * 2),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
             )
+            painter.save()
+            painter.setClipPath(path)
+            painter.drawPixmap(QPointF(center.x() - disc, center.y() - disc), art)
+            painter.restore()
+        else:
+            painter.save()
+            painter.setBrush(QColor(SURFACE))
+            painter.setPen(QPen(ray_gradient(center, spin, 120), 1.5))
+            painter.drawPath(path)
+            painter.restore()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(ray_gradient(center, spin, 170), 1.0))
+        painter.drawPath(path)
 
 
 VISUALIZERS: dict[str, type[VisualizerBase]] = {
@@ -501,19 +605,22 @@ def create_visualizer(kind: str, parent: QWidget | None = None) -> VisualizerBas
 class VisualizerStack(QWidget):
     """Holds all three styles, feeds only the visible one and switches modes."""
 
+    mode_changed = Signal(str)
+
     def __init__(
         self,
         parent: QWidget | None = None,
-        mode: str = BarsVisualizer.mode,
+        mode: str = RadialVisualizer.mode,
     ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._visualizers: dict[str, VisualizerBase] = {}
-        self._mode = mode if mode in VISUALIZERS else BarsVisualizer.mode
+        self._mode = mode if mode in VISUALIZERS else RadialVisualizer.mode
         for kind, factory in VISUALIZERS.items():
             widget = factory(self)
             widget.hide()
+            widget.mode_clicked.connect(self.cycle_mode)
             layout.addWidget(widget)
             self._visualizers[kind] = widget
         self._visualizers[self._mode].show()
@@ -531,18 +638,24 @@ class VisualizerStack(QWidget):
         """Switch the visible visualizer, seeding it with the last frame."""
         if mode not in self._visualizers:
             return self._mode
-        previous = self._visualizers[self._mode]
         target = self._visualizers[mode]
-        if target is previous:
-            self._mode = mode
-            return self._mode
-        target.seed_from(previous)
-        previous.hide()
-        previous.stop()
-        target.show()
-        target.start()
+        previous = self._visualizers[self._mode]
         self._mode = mode
+        if target is not previous:
+            target.seed_from(previous)
+            previous.hide()
+            previous.stop()
+            target.show()
+            target.start()
+        self.mode_changed.emit(mode)
         return self._mode
+
+    def cycle_mode(self) -> str:
+        """Advance to the next style; this is what a click on the stage does."""
+        order = [kind for kind in MODE_ORDER if kind in self._visualizers]
+        if self._mode not in order:
+            return self.set_mode(order[0]) if order else self._mode
+        return self.set_mode(order[(order.index(self._mode) + 1) % len(order)])
 
     def set_spectrum(self, values: Sequence[float]) -> None:
         self.current.set_spectrum(values)
@@ -580,6 +693,7 @@ __all__ = [
     "DEFAULT_PEAK_FALL",
     "DEFAULT_RELEASE",
     "FRAME_INTERVAL_MS",
+    "MODE_ORDER",
     "RadialVisualizer",
     "Smoother",
     "VISUALIZERS",
@@ -594,6 +708,7 @@ __all__ = [
     "fit_bands",
     "fit_wave",
     "idle_target",
+    "ray_gradient",
     "smooth_step",
     "update_peaks",
 ]

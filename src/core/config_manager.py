@@ -35,10 +35,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "cache_limit_mb": 2048,
     "notifications": True,
     "theme": "dark",
+    "shuffle": False,
+    "repeat": "off",
 }
 
 VALID_VISUALIZERS = ("spectrum", "wave", "circular")
 VALID_QUALITIES = ("auto", "lossless", "320", "192")
+REPEAT_MODES = ("off", "all", "one")
 
 
 def config_home() -> Path:
@@ -189,6 +192,22 @@ class ConfigManager:
     def set_quality(self, value: str) -> None:
         name = str(value)
         self.set("quality", name if name in VALID_QUALITIES else "auto")
+
+    def get_shuffle(self) -> bool:
+        """Whether the player bar starts on the shuffled queue."""
+        return self.get_bool("shuffle", False)
+
+    def set_shuffle(self, value: bool) -> None:
+        self.set_bool("shuffle", bool(value))
+
+    def get_repeat(self) -> str:
+        """``off`` / ``all`` / ``one``, the state of the repeat button."""
+        value = str(self.get("repeat", "off"))
+        return value if value in REPEAT_MODES else "off"
+
+    def set_repeat(self, value: str) -> None:
+        name = str(value)
+        self.set("repeat", name if name in REPEAT_MODES else "off")
 
     def get_bool(self, key: str, default: bool = False) -> bool:
         """Read a boolean setting, tolerating strings from hand-edited configs."""

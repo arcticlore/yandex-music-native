@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.config_manager import VALID_QUALITIES, VALID_VISUALIZERS, ConfigManager
+from ui.theme import PAGE_PADDING, SPACE_LG
 from ui.widgets.chips import ChipGroup
 
 VISUALIZER_CHOICES = (
@@ -61,8 +62,8 @@ class SettingsPage(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 16)
-        root.setSpacing(14)
+        root.setContentsMargins(PAGE_PADDING, PAGE_PADDING, PAGE_PADDING, PAGE_PADDING)
+        root.setSpacing(SPACE_LG)
         title = QLabel("Настройки")
         title.setObjectName("PageTitle")
         root.addWidget(title)

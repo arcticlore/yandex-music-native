@@ -1,9 +1,9 @@
 """The small rounded cover in the player bar.
 
-A ``QLabel`` with a style sheet cannot round a pixmap, and the 56x56 cover is
-the one place where a hard rectangle would break the soft look of the bar. The
-pixmap is scaled, clipped to a rounded path and given a soft drop shadow here,
-with a note glyph as the idle state.
+A ``QLabel`` with a style sheet cannot round a pixmap, and the cover is the one
+place where a hard rectangle would break the soft look of the bar.  The pixmap
+is scaled, clipped to a rounded path and given a soft drop shadow here, with a
+note glyph as the idle state.  Colours come from :mod:`ui.theme`.
 """
 
 from __future__ import annotations
@@ -12,11 +12,13 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-from ui.theme import COVER_SIZE, SURFACE, TEXT_MUTED
+from ui.theme import BACKGROUND, BORDER, COVER_SIZE, PANEL, ROW_RADIUS, TEXT_MUTED
 
-BORDER = QColor(255, 255, 255, 18)
-SHADOW = QColor(0, 0, 0, 120)
-RADIUS = 8.0
+SHADOW_ALPHA = 120
+EDGE = QColor(BORDER)
+SHADOW = QColor(BACKGROUND)
+SHADOW.setAlpha(SHADOW_ALPHA)
+RADIUS = float(ROW_RADIUS)
 
 
 class CoverFrame(QWidget):
@@ -78,7 +80,7 @@ class CoverFrame(QWidget):
             painter.setClipPath(self._rounded_path())
             painter.drawPixmap(target, self._pixmap, QRectF(self._pixmap.rect()))
             painter.restore()
-        painter.setPen(QPen(BORDER, 1))
+        painter.setPen(QPen(EDGE, 1))
         painter.drawPath(self._rounded_path(0.5))
         painter.end()
 
@@ -94,7 +96,7 @@ class CoverFrame(QWidget):
     def _paint_placeholder(self, painter: QPainter, target: QRectF) -> None:
         painter.save()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillRect(target, QColor(SURFACE))
+        painter.fillRect(target, QColor(PANEL))
         font = QFont(painter.font())
         font.setPixelSize(round(self._size * 0.42))
         font.setBold(True)
@@ -104,4 +106,4 @@ class CoverFrame(QWidget):
         painter.restore()
 
 
-__all__ = ["BORDER", "RADIUS", "SHADOW", "CoverFrame"]
+__all__ = ["EDGE", "RADIUS", "SHADOW", "CoverFrame"]

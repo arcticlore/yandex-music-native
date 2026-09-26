@@ -10,6 +10,8 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
+from ui.theme import SPACE_SM
+
 Choice = tuple[str, str]
 
 
@@ -29,7 +31,7 @@ class ChipGroup(QWidget):
         self._buttons: dict[str, QPushButton] = {}
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(SPACE_SM)
         label = QLabel(title)
         label.setObjectName("Dim")
         layout.addWidget(label)

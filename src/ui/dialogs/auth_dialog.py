@@ -28,19 +28,23 @@ from PySide6.QtWidgets import (
 
 from core.auth import AuthService
 from core.config_manager import ConfigManager
+from ui.theme import (
+    ACCENT,
+    ACCENT_HOVER,
+    ACCENT_INK,
+    BACKGROUND as BG,
+    BORDER,
+    DANGER,
+    PANEL,
+    SUCCESS as OK,
+    SURFACE as ELEVATED,
+    SURFACE_HOVER,
+    TEXT as FG,
+    TEXT_DIM as DIM,
+    TEXT_MUTED,
+)
 
 log = logging.getLogger(__name__)
-
-BG = "#0e0e14"
-PANEL = "#17171f"
-ELEVATED = "#20202b"
-BORDER = "#2a2a38"
-FG = "#f2f2f7"
-DIM = "#9a9aae"
-ACCENT = "#ffdb4d"
-ACCENT_HOVER = "#ffe782"
-DANGER = "#ff6b6b"
-OK = "#5ad19b"
 
 STYLE = f"""
 QDialog {{ background: {BG}; }}
@@ -55,15 +59,15 @@ QLabel#Hint {{ color: {DIM}; font-size: 11px; }}
 QFrame#Card {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 14px; }}
 QFrame#Avatar {{ background: {ELEVATED}; border: 1px solid {BORDER}; border-radius: 36px; }}
 QLineEdit {{ background: {ELEVATED}; border: 1px solid {BORDER}; border-radius: 8px;
- padding: 9px 11px; selection-background-color: {ACCENT}; selection-color: #141414; }}
+ padding: 9px 11px; selection-background-color: {ACCENT}; selection-color: {ACCENT_INK}; }}
 QLineEdit:focus {{ border-color: {ACCENT}; }}
 QPushButton {{ background: {ELEVATED}; color: {FG}; border: 1px solid {BORDER};
  border-radius: 8px; padding: 9px 16px; font-weight: 600; }}
-QPushButton:hover {{ background: #262633; }}
+QPushButton:hover {{ background: {SURFACE_HOVER}; }}
 QPushButton:disabled {{ color: {DIM}; background: {PANEL}; }}
-QPushButton#Primary {{ background: {ACCENT}; color: #141414; border: none; font-weight: 700; }}
+QPushButton#Primary {{ background: {ACCENT}; color: {ACCENT_INK}; border: none; font-weight: 700; }}
 QPushButton#Primary:hover {{ background: {ACCENT_HOVER}; }}
-QPushButton#Primary:disabled {{ background: #3a3a46; color: #6c6c7a; }}
+QPushButton#Primary:disabled {{ background: {SURFACE_HOVER}; color: {TEXT_MUTED}; }}
 QPushButton#Link {{ background: transparent; border: none; color: {ACCENT};
  padding: 4px; font-size: 12px; text-align: left; }}
 QPushButton#Link:hover {{ color: {ACCENT_HOVER}; text-decoration: underline; }}
@@ -368,7 +372,7 @@ class AuthDialog(QDialog):
         self._plus_badge = QLabel("")
         self._plus_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._plus_badge.setStyleSheet(
-            f"color: #141414; background: {ACCENT}; border-radius: 10px;"
+            f"color: {ACCENT_INK}; background: {ACCENT}; border-radius: 10px;"
             " padding: 5px 12px; font-weight: 700; font-size: 12px;"
         )
         badge_row = QHBoxLayout()
@@ -543,13 +547,13 @@ class AuthDialog(QDialog):
         self._plus_badge.setText("Яндекс Плюс" if has_plus else "Без подписки")
         self._plus_badge.setStyleSheet(
             (
-                f"color: #141414; background: {ACCENT};"
+                f"color: {ACCENT_INK}; background: {ACCENT};"
                 if has_plus
                 else f"color: {DIM}; background: {ELEVATED}; border: 1px solid {BORDER};"
             )
             + " border-radius: 10px; padding: 5px 12px; font-weight: 700; font-size: 12px;"
         )
-        self._set_status("Вы вошли в аккаунт")
+        self._set_status("Вы вошли в аккаунт", success=True)
         self._stack.setCurrentIndex(1)
         self._fit_height()
         avatar_url = user_data.get("avatar_url")
@@ -584,9 +588,10 @@ class AuthDialog(QDialog):
             )
         )
 
-    def _set_status(self, text: str, error: bool = False) -> None:
+    def _set_status(self, text: str, error: bool = False, success: bool = False) -> None:
         self._status.setText(text)
-        self._status.setStyleSheet(f"color: {DANGER if error else DIM}; font-size: 12px;")
+        colour = DANGER if error else OK if success else DIM
+        self._status.setStyleSheet(f"color: {colour}; font-size: 12px;")
         if error:
             self._spinner.stop()
 

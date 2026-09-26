@@ -19,9 +19,10 @@ from unittest import mock
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QPixmap, QWheelEvent
+from PySide6.QtGui import QColor, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QSystemTrayIcon
+from PySide6.QtWidgets import QWidget
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -43,13 +44,20 @@ from core.yandex_service import (  # noqa: E402
 )
 from test_playback_controller import Rig, check, make_track  # noqa: E402
 from ui.app import attach_integrations, build_window  # noqa: E402
-from ui.main_window import MainWindow  # noqa: E402
+from ui.main_window import VISUALIZER_LABELS, MainWindow  # noqa: E402
 from ui.pages.collection_page import CollectionPage  # noqa: E402
 from ui.pages.search_page import SearchPage  # noqa: E402
 from ui.pages.settings_page import SettingsPage  # noqa: E402
 from ui.pages.wave_page import WavePage  # noqa: E402
-from ui.theme import BACKGROUND, DARK_QSS, apply_theme  # noqa: E402
+from ui.theme import (  # noqa: E402
+    BACKGROUND,
+    DARK_QSS,
+    PANEL_RADIUS,
+    SEGMENT_HEIGHT,
+    apply_theme,
+)
 from ui.widgets.chips import ChipGroup  # noqa: E402
+from ui.widgets.results_panel import ResultsPanel  # noqa: E402
 from ui.widgets.track_list import TrackList, format_duration, track_line  # noqa: E402
 from ui.widgets.visualizer import (  # noqa: E402
     DEFAULT_BANDS,
@@ -475,6 +483,37 @@ def test_search_page_flow(app) -> None:
         rig.close()
 
 
+def test_segment_bar_drives_the_pages(app) -> None:
+    """A click on a segment has to move the stacked view under it."""
+    panel = ResultsPanel()
+    tracks, albums = QWidget(), QWidget()
+    panel.add_page(tracks, "Треки")
+    panel.add_page(albums, "Альбомы")
+    seen: list[int] = []
+    panel.segments.changed.connect(seen.append)
+    panel.show()
+    app.processEvents()
+    check("first section is showing", panel.tabs.currentIndex() == 0)
+    panel.segments.buttons[1].click()
+    app.processEvents()
+    check("the click reaches the view", panel.tabs.currentIndex() == 1)
+    check("the click is announced once", seen == [1])
+    check("the pill moved", panel.segments.active == 1)
+    check("exactly one pill is lit", [b.isChecked() for b in panel.segments.buttons] == [False, True])
+    panel.tabs.setCurrentIndex(0)
+    app.processEvents()
+    check("a tab change syncs the bar without a second click", panel.segments.active == 0 and seen == [1])
+    check("one segment per section", len(panel.segments.buttons) == 2)
+    check("the backing hugs its segments", panel.segments.width() < panel.width() - 2 * PANEL_RADIUS)
+    check("the bar leaves room for its own frame", panel.segments.height() > SEGMENT_HEIGHT)
+    check(
+        "every segment is a full token tall",
+        all(b.height() == SEGMENT_HEIGHT for b in panel.segments.buttons),
+    )
+    panel.close()
+    panel.deleteLater()
+
+
 def test_search_page_empty_results(app) -> None:
     rig = Rig(app)
     try:
@@ -722,17 +761,22 @@ def test_main_window_player_bar_follows_controller(app, config: ConfigManager) -
         rig.settle()
         check("title shown", window.title_label.text() != "Ничего не играет")
         check("artist shown", "Artist" in window.artist_label.text())
-        check("pause icon", window.play_button.text() == "⏸")
+        # The transport is icon-only, so the check is that the icon itself swaps
+        # between the pause and the play glyph.
+        pause_icon_key = window.play_button.icon().pixmap(18, 18).cacheKey()
+        check("pause icon painted", pause_icon_key != 0)
+        check("play button is a bare icon", window.play_button.text() == "")
         window._on_play()
         app.processEvents()
-        check("paused icon", window.play_button.text() == "▶")
+        check("paused icon painted", window.play_button.icon().pixmap(18, 18).cacheKey() != pause_icon_key)
         check("state paused", rig.controller.state == PlaybackState.PAUSED)
         check("like starts unliked", window.like_button.isChecked() is False)
         window._on_like()
         rig.settle()
         check("like sent", rig.client.like_calls == [("add", (str(rig.controller.current.id),))])
         window._on_mute()
-        check("muted", window.volume_slider.value() == 0 and window.mute_button.text() == "🔇")
+        check("muted", window.volume_slider.value() == 0 and window.mute_button.text() == "")
+        check("mute tooltip follows", window.mute_button.toolTip() == "Включить звук")
         window._on_mute()
         check("unmuted", window.volume_slider.value() > 0)
         window.seek_slider.setValue(1000)
@@ -751,9 +795,19 @@ def test_main_window_visualizer_cycle_and_persistence(app, config: ConfigManager
         check("initial mode", window.wave_page.visualizer.mode == config.get_visualizer())
         modes = [window.cycle_visualizer() for _ in range(3)]
         check("cycles all", sorted(modes) == sorted(VALID_VISUALIZERS))
-        check("button label", window.visualizer_button.text() in {"Спектр", "Волна", "Круг"})
+        check("mode button is a bare icon", window.visualizer_button.text() == "")
+        check("mode button paints an icon", window.visualizer_button.icon().pixmap(20, 20).cacheKey() != 0)
+        check(
+            "tooltip names the mode",
+            VISUALIZER_LABELS[window.wave_page.visualizer.mode] in window.visualizer_button.toolTip(),
+        )
         window.set_visualizer_mode("circular")
         check("explicit mode", window.wave_page.visualizer.mode == "circular")
+        # A click on the stage itself walks the same cycle and the button follows.
+        clicked = window.wave_page.visualizer.cycle_mode()
+        check("click advances the stage", window.wave_page.visualizer.mode == clicked)
+        check("button followed the click", VISUALIZER_LABELS[clicked] in window.visualizer_button.toolTip())
+        window.set_visualizer_mode("circular")
         window.volume_slider.setValue(42)
         window.close()
         check("volume persisted", config.get_volume() == 42)
@@ -767,7 +821,8 @@ def test_main_window_visualizer_cycle_and_persistence(app, config: ConfigManager
 
 def test_track_rows_use_the_painted_delegate(app) -> None:
     from core.yandex_service import WaveTrack
-    from ui.widgets.track_list import TRACK_ROW_HEIGHT, TrackRowDelegate, album_column_width
+    from ui.theme import COVER_SIZE, PANEL, PLAYING_BG, ROW_HEIGHT, tint
+    from ui.widgets.track_list import TrackRowDelegate, row_columns
 
     listing = TrackList()
     listing.set_tracks(
@@ -787,22 +842,46 @@ def test_track_rows_use_the_painted_delegate(app) -> None:
     check("delegate installed", isinstance(listing.itemDelegate(), TrackRowDelegate))
     check(
         "row height",
-        listing.itemDelegate().sizeHint(None, listing.model().index(0, 0)).height() == TRACK_ROW_HEIGHT,
+        listing.itemDelegate().sizeHint(None, listing.model().index(0, 0)).height() == ROW_HEIGHT,
     )
-    check("album column for a wide row", album_column_width(900) > 0)
-    check("album column dropped when narrow", album_column_width(420) == 0)
+    wide = row_columns(900)
+    narrow = row_columns(420)
+    check("album column for a wide row", wide.show_album and wide.album_width > 0)
+    check("album column dropped when narrow", not narrow.show_album and narrow.album_width == 0)
+    check("actions dropped when narrow", not narrow.show_actions)
+    check("title keeps a usable minimum width", narrow.text_width >= 80)
     check("text is still readable", listing.item(0).text().startswith("Кино — Дельфин"))
     check("duration rendered", listing.item(0).text().endswith("3:35"))
     check("no row is playing yet", not _is_playing(listing, 0))
     listing.set_tracks_playing("t2")
     check("playing marker moved", _is_playing(listing, 1) and not _is_playing(listing, 0))
 
-    listing.resize(760, TRACK_ROW_HEIGHT * 2)
+    listing.resize(760, ROW_HEIGHT * 2)
+    # A loud viewport colour proves the rows paint their own base surface
+    # instead of inheriting a transparent or black one.
+    listing.setStyleSheet("QListWidget#TrackList { background: #ff00ff; border: none; }")
     listing.show()
     app.processEvents()
     image = listing.grab().toImage()
-    check("gold marker painted", _is_gold(image.pixelColor(4, TRACK_ROW_HEIGHT + 20).name()))
-    check("plain row has no marker", not _is_gold(image.pixelColor(4, 20).name()))
+    check("a resting row paints the base surface", _hex(image.pixelColor(400, 8)) == PANEL)
+    check("the base is uniform across the row", _hex(image.pixelColor(700, 8)) == PANEL)
+    # The playing row is the panel plus a soft accent wash, so it is the token
+    # mixed onto the panel rather than a second solid colour.
+    playing = image.pixelColor(400, ROW_HEIGHT + 8)
+    check("the playing row keeps the same geometry", _hex(playing) != PANEL)
+    check("the playing row is washed in accent", _hex(playing) == tint(PANEL, PLAYING_BG).name().upper())
+    check("the wash stays subtle", playing.red() - QColor(PANEL).red() < 24)
+    # The sounding row shows a mini equaliser where the number would be, so
+    # the check looks for gold anywhere in that column rather than at one pixel.
+    check("equalizer painted", _gold_in_number_column(image, 1))
+    check("plain row has no equalizer", not _gold_in_number_column(image, 0))
+    check(
+        "the equalizer stays inside its row",
+        _gold_in_number_column(image, 1) and not _gold_in_number_column(image, 0),
+    )
+    check("row geometry is not shifted", listing.visualItemRect(listing.item(1)).height() == ROW_HEIGHT)
+    check("cover fits the row", COVER_SIZE <= ROW_HEIGHT - 8)
+    listing.setStyleSheet("")
     listing.deleteLater()
 
 
@@ -894,6 +973,23 @@ def _is_playing(listing: TrackList, row: int) -> bool:
     from ui.widgets.track_list import _ROLE_PLAYING
 
     return bool(listing.item(row).data(_ROLE_PLAYING))
+
+
+def _hex(colour) -> str:
+    return colour.name().upper()
+
+
+def _gold_in_number_column(image, row: int) -> bool:
+    """Any gold pixel inside the leading column of one painted row."""
+    from ui.theme import ROW_HEIGHT
+    from ui.widgets.track_list import NUMBER_COLUMN
+
+    top = row * ROW_HEIGHT
+    for y in range(top + 4, top + ROW_HEIGHT - 4):
+        for x in range(NUMBER_COLUMN):
+            if _is_gold(image.pixelColor(x, y).name()):
+                return True
+    return False
 
 
 def _is_gold(name: str) -> bool:

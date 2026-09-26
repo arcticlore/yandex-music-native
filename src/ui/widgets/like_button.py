@@ -11,11 +11,10 @@ from PySide6.QtCore import QEasingCurve, Qt, QVariantAnimation
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QPushButton
 
-from ui.theme import LIKE_ACTIVE, SURFACE_HOVER, TEXT_DIM
+from ui.theme import ICON_BUTTON, LIKE_ACTIVE, LIKE_GLOW, SURFACE_HOVER, TEXT_DIM, pill_radius
 
 ANIMATION_MS = 220
-GLOW_ALPHA = 56
-SIZE = 32
+SIZE = ICON_BUTTON
 
 
 def blend(start: str, end: str, mix: float) -> str:
@@ -70,13 +69,13 @@ class LikeButton(QPushButton):
 
     def _repaint(self) -> None:
         colour = blend(TEXT_DIM, LIKE_ACTIVE, self._mix)
-        glow = round(GLOW_ALPHA * self._mix)
+        radius = pill_radius(ICON_BUTTON)
         self.setStyleSheet(
             "QPushButton#LikeButton {"
             f" color: {colour};"
-            f" background: rgba(255, 51, 102, {glow});"
-            " border: none; border-radius: 16px; }"
+            " border: none; }"
             f"QPushButton#LikeButton:hover {{ background: {SURFACE_HOVER}; color: {colour}; }}"
+            f"QPushButton#LikeButton:checked {{ background: {LIKE_GLOW}; border-radius: {radius}px; }}"
         )
 
 

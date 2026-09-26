@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import random
 import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -25,6 +26,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from core import station
 from core.audio_engine import STATE_PAUSED, STATE_PLAYING, STATE_STOPPED, AudioEngine
+from core.config_manager import REPEAT_MODES
 from core.network import COVER_TIMEOUTS
 from core.yandex_service import (
     DEFAULT_COVER_SIZE,
@@ -290,6 +292,8 @@ class PlaybackController(QObject):
         self._mode = QueueMode.MANUAL
         self._manual_queue: list[WaveTrack] = []
         self._manual_index = -1
+        self._shuffle = False
+        self._repeat = "off"
         self._pending: WaveTrack | None = None
         self._current: TrackMetadata | None = None
         self._current_wave: WaveTrack | None = None
@@ -354,6 +358,16 @@ class PlaybackController(QObject):
     @property
     def state(self) -> PlaybackState:
         return self._state
+
+    @property
+    def shuffle(self) -> bool:
+        """Whether the manual queue is played in shuffled order."""
+        return self._shuffle
+
+    @property
+    def repeat(self) -> str:
+        """``off`` / ``all`` / ``one`` - the state of the repeat button."""
+        return self._repeat
 
     @property
     def current(self) -> TrackMetadata | None:
@@ -440,6 +454,47 @@ class PlaybackController(QObject):
             return False
         return self._start_manual([target], 0)
 
+    # -- queue order --------------------------------------------------------
+
+    def toggle_shuffle(self) -> bool:
+        """Flip shuffle and reorder the manual queue accordingly.
+
+        The track that is sounding stays where it is, so switching shuffle on in
+        the middle of a queue does not interrupt playback.  A radio stream has
+        no queue of ours to reorder, so only the flag moves.
+        """
+        self._shuffle = not self._shuffle
+        if self._mode != QueueMode.MANUAL or len(self._manual_queue) < 2:
+            return self._shuffle
+        playing = (
+            self._manual_queue[self._manual_index]
+            if 0 <= self._manual_index < len(self._manual_queue)
+            else None
+        )
+        rest = [item for item in self._manual_queue if item is not playing]
+        random.shuffle(rest)
+        self._manual_queue = ([playing] if playing is not None else []) + rest
+        self._manual_index = 0 if playing is not None else -1
+        self._emit_queue()
+        return self._shuffle
+
+    def cycle_repeat(self) -> str:
+        """``off`` -> ``all`` -> ``one`` -> ``off``, the classic repeat cycle."""
+        self._repeat = REPEAT_MODES[(REPEAT_MODES.index(self._repeat) + 1) % len(REPEAT_MODES)]
+        return self._repeat
+
+    def set_shuffle(self, value: bool) -> bool:
+        """Force the shuffle state, used when the window restores the config."""
+        if bool(value) == self._shuffle:
+            return self._shuffle
+        return self.toggle_shuffle()
+
+    def set_repeat(self, value: str) -> str:
+        """Force the repeat state, validated against :data:`REPEAT_MODES`."""
+        name = str(value)
+        self._repeat = name if name in REPEAT_MODES else "off"
+        return self._repeat
+
     def play_playlist(self, tracks: Iterable[Any], start_index: int = 0) -> bool:
         """Replace the queue with ``tracks`` and start at ``start_index``."""
         items = [item for item in (self._coerce_track(one) for one in tracks) if item is not None]
@@ -472,6 +527,7 @@ class PlaybackController(QObject):
         self._mode = QueueMode.RADIO
         self._manual_queue = []
         self._manual_index = -1
+        self._shuffle = False
         self._report_leave(completed=False)
         self._engine.stop()
         self._set_buffering(True)
@@ -767,6 +823,16 @@ class PlaybackController(QObject):
             return
         self._manual_index += 1
         target = self._next_manual()
+        if target is None:
+            # Repeat wraps the manual queue: «one» replays the same track, «all»
+            # starts it over.  Both keep playing, which is the whole point of
+            # the repeat button in a player bar.
+            if self._repeat == "one" and self._manual_queue:
+                self._manual_index = max(0, self._manual_index - 1)
+                target = self._manual_queue[self._manual_index]
+            elif self._repeat == "all" and self._manual_queue:
+                self._manual_index = 0
+                target = self._manual_queue[0]
         if target is None:
             self._stop_playback(report=False)
             return

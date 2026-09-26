@@ -4,6 +4,10 @@ The selectors are built from :mod:`core.station`, whose value sets are exactly
 the ones ``rotor_station_settings2`` accepts. Picking a chip while the station
 is running restarts «Моя волна» immediately, so a new mood is audible without
 pressing anything else.
+
+The four groups sit in a two-by-two grid of pill chips rather than in four full
+width rows: each axis is a self-contained block with its own label, so the
+selectors read as one settings panel instead of a wall of buttons.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -33,6 +38,7 @@ from core.station import (
     WAVE_MOODS,
     chips,
 )
+from ui.theme import PAGE_PADDING, SPACE_LG, SPACE_MD
 from ui.widgets.chips import ChipGroup
 from ui.widgets.visualizer import VisualizerStack
 
@@ -41,6 +47,8 @@ ACTIVITY_CHOICES = chips(WAVE_ACTIVITIES, ACTIVITY_LABELS)
 LANGUAGE_CHOICES = chips(WAVE_LANGUAGES, LANGUAGE_LABELS)
 DIVERSITY_CHOICES = chips(WAVE_DIVERSITIES, DIVERSITY_LABELS)
 
+VISUALIZER_HINT = "Нажмите на визуализатор, чтобы сменить режим"
+
 
 class WavePage(QWidget):
     """Station stage: visualizer, chip selectors and the start button."""
@@ -48,6 +56,8 @@ class WavePage(QWidget):
     selection_changed = Signal(dict)
     play_requested = Signal()
     settings_error = Signal(str)
+    visualizer_mode_changed = Signal(str)
+    """A click on the stage, or a change made elsewhere, landed on ``mode``."""
 
     def __init__(
         self,
@@ -69,8 +79,8 @@ class WavePage(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 16)
-        root.setSpacing(14)
+        root.setContentsMargins(PAGE_PADDING, PAGE_PADDING, PAGE_PADDING, PAGE_PADDING)
+        root.setSpacing(SPACE_LG)
 
         header = QHBoxLayout()
         title = QLabel("Моя волна")
@@ -89,6 +99,9 @@ class WavePage(QWidget):
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setSpacing(0)
         self.stage = VisualizerStack(self.card)
+        # A click on the stage walks through the styles, and whoever shows the
+        # mode as an icon is told about it so the two never disagree.
+        self.stage.mode_changed.connect(self.visualizer_mode_changed)
         card_layout.addWidget(self.stage, 1)
         root.addWidget(self.card, 1)
 
@@ -98,16 +111,27 @@ class WavePage(QWidget):
             "language": ChipGroup("Язык", LANGUAGE_CHOICES),
             "diversity": ChipGroup("Подбор", DIVERSITY_CHOICES),
         }
-        selectors = QVBoxLayout()
-        selectors.setSpacing(8)
-        for group in self.groups.values():
-            selectors.addWidget(group)
+        # Two by two: each axis keeps its own label and its own row of pills, and
+        # the four blocks share the width of the page instead of stacking into
+        # one column of full-width chip rows.
+        selectors = QGridLayout()
+        selectors.setContentsMargins(0, 0, 0, 0)
+        selectors.setHorizontalSpacing(SPACE_LG)
+        selectors.setVerticalSpacing(SPACE_MD)
+        for position, group in enumerate(self.groups.values()):
+            selectors.addWidget(group, position // 2, position % 2)
+        selectors.setColumnStretch(0, 1)
+        selectors.setColumnStretch(1, 1)
         root.addLayout(selectors)
 
         footer = QHBoxLayout()
         self.status_label = QLabel("Выберите «Запустить волну», чтобы начать поток")
         self.status_label.setObjectName("Dim")
         footer.addWidget(self.status_label, 1)
+        self.mode_hint = QLabel(VISUALIZER_HINT)
+        self.mode_hint.setObjectName("Dim")
+        self.mode_hint.setToolTip(VISUALIZER_HINT)
+        footer.addWidget(self.mode_hint)
         root.addLayout(footer)
 
         for axis, group in self.groups.items():
@@ -233,5 +257,6 @@ __all__ = [
     "DIVERSITY_CHOICES",
     "LANGUAGE_CHOICES",
     "MOOD_CHOICES",
+    "VISUALIZER_HINT",
     "WavePage",
 ]

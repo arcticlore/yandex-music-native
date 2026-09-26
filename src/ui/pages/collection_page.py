@@ -3,24 +3,26 @@
 Every section is fetched through :meth:`core.yandex_service.YandexService.load_liked`,
 which runs the request on the service worker thread; the page only renders the
 ``collection_ready`` payload, so scrolling never blocks the GUI.
+
+The page draws one frame around the whole result area - see
+:class:`ui.widgets.results_panel.ResultsPanel` - so the tabs, the list and the
+status line read as three bands of one block instead of four nested boxes.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout,
     QLabel,
-    QListWidget,
     QListWidgetItem,
-    QPushButton,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from core.playback_controller import PlaybackController
-from ui.widgets.track_list import TrackList, apply_row_delegate, entry_item
+from ui.theme import PAGE_PADDING, SPACE_LG
+from ui.widgets.results_panel import ResultsPanel, header_row
+from ui.widgets.track_list import TrackList, entry_item
 
 SECTION_TITLES = {
     "tracks": "Любимые треки",
@@ -47,7 +49,6 @@ class CollectionPage(QWidget):
         controller.service.collection_ready.connect(self._on_ready)
         controller.service.collection_failed.connect(self._on_failed)
         for section in SECTION_ORDER:
-            self.tabs.setTabText(self.tabs.indexOf(self._pages[section]), SECTION_TITLES[section])
             page = self._pages[section]
             if isinstance(page, TrackList):
                 page.set_placeholder("Нажмите «Обновить»")
@@ -56,30 +57,28 @@ class CollectionPage(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 16)
-        root.setSpacing(14)
-        header = QHBoxLayout()
-        title = QLabel("Коллекция")
-        title.setObjectName("PageTitle")
-        header.addWidget(title)
+        root.setContentsMargins(PAGE_PADDING, PAGE_PADDING, PAGE_PADDING, PAGE_PADDING)
+        root.setSpacing(SPACE_LG)
+
+        header, _title = header_row("Коллекция")
+        self.panel = ResultsPanel()
         header.addStretch(1)
-        self.refresh_button = QPushButton("Обновить")
+        self.refresh_button = ResultsPanel.page_button("Обновить")
         self.refresh_button.clicked.connect(self.refresh)
         header.addWidget(self.refresh_button)
         root.addLayout(header)
 
-        self.tabs = QTabWidget()
+        self.tabs = self.panel.tabs
         self._pages: dict[str, QWidget] = {}
         for section in SECTION_ORDER:
             if section == "tracks":
                 page: QWidget = TrackList()
                 page.track_activated.connect(self._play)  # type: ignore[attr-defined]
+                self.panel.add_page(page, SECTION_TITLES[section])
             else:
-                page = apply_row_delegate(QListWidget())
-                page.setObjectName("TrackList")
+                page = self.panel.add_result_list(SECTION_TITLES[section])
             self._pages[section] = page
-            self.tabs.addTab(page, section)
-        root.addWidget(self.tabs, 1)
+        root.addWidget(self.panel, 1)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("Dim")

@@ -10,8 +10,15 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QCloseEvent,
+    QFontMetrics,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -19,6 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QVBoxLayout,
@@ -33,13 +41,40 @@ from ui.pages.settings_page import SettingsPage
 from ui.pages.wave_page import WavePage
 from ui.theme import (
     ACCENT,
+    BADGE_HEIGHT,
     COVER_SIZE,
+    ICON_BUTTON,
     NAV_ITEM_HEIGHT,
-    PLAY_BUTTON_SIZE,
     PLAYER_BAR_HEIGHT,
+    PLAYER_COVER_SIZE,
+    PLAYER_LEFT_WIDTH,
+    PLAYER_RIGHT_WIDTH,
+    PLAY_BUTTON_SIZE,
     SIDEBAR_WIDTH,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    SPACE_XL,
+    SPACE_XS,
+    TIME_LABEL_WIDTH,
+    VOLUME_SLIDER_WIDTH,
 )
 from ui.widgets.cover_frame import CoverFrame
+from ui.widgets.icons import pause as pause_icon
+from ui.widgets.icons import play as play_icon
+from ui.widgets.icons import (
+    repeat as repeat_icon,
+)
+from ui.widgets.icons import (
+    shuffle as shuffle_icon,
+)
+from ui.widgets.icons import (
+    skip as skip_icon,
+)
+from ui.widgets.icons import (
+    speaker as speaker_icon,
+)
+from ui.widgets.icons import visualizer_icon
 from ui.widgets.like_button import LikeButton
 from ui.widgets.track_list import format_duration
 
@@ -57,26 +92,50 @@ VISUALIZER_LABELS = {
     "wave": "Волна",
     "circular": "Круг",
 }
+REPEAT_LABELS = {"off": "выключен", "all": "всё", "one": "трек"}
 SEEK_STEP_MS = 5000
 THREAD_JOIN_MS = 1500
 VOLUME_STEP = 5
-LOSSLESS_BADGE = "FLAC Lossless"
+LOSSLESS_BADGE = "FLAC"
+LOSSY_BADGE = "HQ"
 MIN_WINDOW = (1120, 680)
-SIDE_PANEL_WIDTH = 264
-TITLE_WIDTH = 140
+SIDE_PANEL_WIDTH = PLAYER_RIGHT_WIDTH
+"""The fixed width of the right-hand section, kept as a public alias."""
+
+PLAYER_MARGIN = 20
+PLAYER_PAD_Y = 14
+PLAYER_SECTION_GAP = 24
+SEEK_ROW_HEIGHT = 20
+MIN_ELIDE_WIDTH = 96
+STATUS_BAR_HEIGHT = 28
+TRANSPORT_MIN_WIDTH = 280
+MODE_BUTTON_TOOLTIP = "Режим визуализации"
 
 
 def quality_badge(track: object | None) -> str:
-    """Short quality pill for the player bar: ``FLAC Lossless`` / ``HQ 320``."""
+    """Short quality pill for the player bar: ``FLAC`` or ``HQ``.
+
+    The bar has 260px for the whole left section, so the pill carries the flag
+    and not the bitrate; the full wording stays available as the tooltip.
+    """
     if track is None:
         return ""
     if getattr(track, "lossless", False):
         return LOSSLESS_BADGE
+    return LOSSY_BADGE
+
+
+def quality_detail(track: object | None) -> str:
+    """The long form of :func:`quality_badge`, shown in the pill's tooltip."""
+    if track is None:
+        return ""
+    if getattr(track, "lossless", False):
+        return "FLAC Lossless"
     quality = str(getattr(track, "quality", "") or "").strip()
     if quality:
         return quality.upper()
     bitrate = int(getattr(track, "bitrate", 0) or 0)
-    return f"{bitrate} kbps" if bitrate else ""
+    return f"{bitrate} kbps" if bitrate else LOSSY_BADGE
 
 
 class VolumePanel(QWidget):
@@ -145,6 +204,10 @@ class MainWindow(QMainWindow):
         self._config = config
         self._seeking = False
         self._closed = False
+        self._title_text = ""
+        self._artist_text = ""
+        self._profile_text = "Не авторизован"
+        self._profile_hint_text = ""
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(*MIN_WINDOW)
         self.resize(1180, 720)
@@ -154,6 +217,45 @@ class MainWindow(QMainWindow):
         self._refresh_all()
 
     # -- construction -------------------------------------------------------
+
+    @staticmethod
+    def _elided(label: QLabel, text: str) -> str:
+        """``text`` shortened with an ellipsis to what ``label`` can show.
+
+        Qt does not elide a ``QLabel`` on its own, and a fixed maximum width
+        either truncates the title in a wide window or clips it in a narrow one.
+        The full string stays in the tooltip, so nothing becomes unreachable.
+        """
+        full = text or ""
+        metrics = QFontMetrics(label.font())
+        width = max(label.width(), MIN_ELIDE_WIDTH)
+        return metrics.elidedText(full, Qt.TextElideMode.ElideRight, width)
+
+    def _eliding_label(self, object_name: str, text: str) -> QLabel:
+        """A single-line label that elides itself when the window is resized."""
+        label = QLabel(text)
+        label.setObjectName(object_name)
+        label.setWordWrap(False)
+        label.setMinimumWidth(MIN_ELIDE_WIDTH)
+        label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        label.setToolTip(text)
+        return label
+
+    def _refresh_elided_texts(self) -> None:
+        """Re-elide the labels whose width follows the window."""
+        for label, text in (
+            (self.title_label, self._title_text),
+            (self.artist_label, self._artist_text),
+            (self.profile_label, self._profile_text),
+            (self.profile_hint, self._profile_hint_text),
+        ):
+            if text:
+                label.setText(self._elided(label, text))
+
+    def _set_elided(self, label: QLabel, attribute: str, text: str) -> None:
+        setattr(self, attribute, text)
+        label.setToolTip(text)
+        label.setText(self._elided(label, text))
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -180,20 +282,23 @@ class MainWindow(QMainWindow):
         middle_layout.addWidget(self._build_player_bar())
         root_layout.addWidget(middle, 1)
         self.setCentralWidget(root)
+        # A fixed-height message band: the footer is part of the frame, so a
+        # message appearing must not push the layout around.
+        self.statusBar().setFixedHeight(STATUS_BAR_HEIGHT)
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(SIDEBAR_WIDTH)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(14, 20, 14, 16)
-        layout.setSpacing(6)
+        layout.setContentsMargins(SPACE_MD, SPACE_XL, SPACE_MD, SPACE_LG)
+        layout.setSpacing(SPACE_SM)
         brand = QLabel("♪ Яндекс Музыка")
         brand.setObjectName("Brand")
         brand.setTextFormat(Qt.TextFormat.RichText)
         brand.setText(f'<span style="color:{ACCENT}">♪</span>&nbsp; Яндекс Музыка')
         layout.addWidget(brand)
-        layout.addSpacing(14)
+        layout.addSpacing(SPACE_LG)
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
@@ -230,29 +335,45 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("ProfileCard")
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+        layout.setSpacing(SPACE_MD)
         self.avatar_label = QLabel()
         self.avatar_label.setObjectName("ProfileAvatar")
-        self.avatar_label.setFixedSize(40, 40)
+        self.avatar_label.setFixedSize(COVER_SIZE, COVER_SIZE)
         self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.avatar_label)
 
         text = QVBoxLayout()
-        text.setSpacing(2)
+        text.setSpacing(SPACE_XS)
+        text.setContentsMargins(0, 0, 0, 0)
         self.profile_label = QLabel("Не авторизован")
         self.profile_label.setObjectName("ProfileName")
-        self.profile_label.setWordWrap(True)
+        self.profile_label.setWordWrap(False)
+        self.profile_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.profile_hint = QLabel("Войдите, чтобы слушать")
         self.profile_hint.setObjectName("ProfileHint")
+        self.profile_hint.setWordWrap(False)
+        self.profile_hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         text.addWidget(self.profile_label)
         text.addWidget(self.profile_hint)
         layout.addLayout(text, 1)
 
+        # The badge sits in the second line of the card, so a long login cannot
+        # push it out of the sidebar and a «ПЛЮС» cannot overlap the name.
         self.plus_badge = QLabel("ПЛЮС")
         self.plus_badge.setObjectName("PlusBadge")
         self.plus_badge.setVisible(False)
-        layout.addWidget(self.plus_badge, 0, Qt.AlignmentFlag.AlignTop)
+        # The fixed height is what makes the painted radius the one the token
+        # asks for: a label sized by its font comes out taller than BADGE_HEIGHT
+        # and the pill comes out squashed.
+        self.plus_badge.setFixedHeight(BADGE_HEIGHT)
+        self.plus_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._profile_badge_row = QHBoxLayout()
+        self._profile_badge_row.setContentsMargins(0, 0, 0, 0)
+        self._profile_badge_row.setSpacing(SPACE_XS)
+        self._profile_badge_row.addWidget(self.plus_badge)
+        self._profile_badge_row.addStretch(1)
+        text.addLayout(self._profile_badge_row)
         return card
 
     def _build_logout_button(self) -> QPushButton:
@@ -265,107 +386,150 @@ class MainWindow(QMainWindow):
         return self.logout_button
 
     def _build_player_bar(self) -> QWidget:
+        """The classic three-section bar: metadata, transport, volume.
+
+        The two outer sections are fixed, so the transport column is the only
+        thing that reflows; the seek row underneath it always spans the whole
+        centre, which is what makes the bar read as one object rather than three
+        floating panels.
+        """
         bar = QFrame()
         bar.setObjectName("PlayerBar")
         bar.setFixedHeight(PLAYER_BAR_HEIGHT)
+        self.player_bar = bar
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(18, 10, 18, 10)
-        layout.setSpacing(16)
-        layout.addWidget(self._build_now_playing(), 1)
-        layout.addWidget(self._build_transport(), 3)
-        layout.addWidget(self._build_volume_panel(), 1)
+        layout.setContentsMargins(PLAYER_MARGIN, PLAYER_PAD_Y, PLAYER_MARGIN, PLAYER_PAD_Y)
+        layout.setSpacing(PLAYER_SECTION_GAP)
+        layout.addWidget(self._build_now_playing(), 0)
+        layout.addWidget(self._build_transport(), 1)
+        layout.addWidget(self._build_volume_panel(), 0)
         return bar
 
     def _build_now_playing(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("NowPlaying")
-        panel.setFixedWidth(SIDE_PANEL_WIDTH)
+        panel.setFixedWidth(PLAYER_LEFT_WIDTH)
+        panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        self.cover_label = CoverFrame(COVER_SIZE)
-        layout.addWidget(self.cover_label)
+        layout.setSpacing(SPACE_MD)
+        self.cover_label = CoverFrame(PLAYER_COVER_SIZE)
+        layout.addWidget(self.cover_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         titles = QVBoxLayout()
-        titles.setSpacing(1)
+        titles.setSpacing(SPACE_XS)
         titles.setContentsMargins(0, 0, 0, 0)
-        self.title_label = QLabel("Ничего не играет")
-        self.title_label.setObjectName("TrackTitle")
-        self.title_label.setWordWrap(False)
-        self.title_label.setMaximumWidth(TITLE_WIDTH)
-        self.artist_label = QLabel("")
-        self.artist_label.setObjectName("TrackArtist")
-        self.artist_label.setMaximumWidth(TITLE_WIDTH)
-        titles.addWidget(self.title_label)
-        titles.addWidget(self.artist_label)
-        layout.addLayout(titles)
-        layout.addStretch(1)
+        # The like button shares the title line: the heart belongs next to the
+        # name it likes, and the artist line below keeps the FLAC / HQ pill.
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(SPACE_XS)
+        self.title_label = self._eliding_label("TrackTitle", "Ничего не играет")
+        title_row.addWidget(self.title_label, 1)
+        self.like_button = LikeButton()
+        self.like_button.clicked.connect(self._on_like)
+        title_row.addWidget(self.like_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        titles.addLayout(title_row)
 
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        meta_row.setSpacing(SPACE_SM)
+        self.artist_label = self._eliding_label("TrackArtist", "")
+        meta_row.addWidget(self.artist_label, 1)
         self.quality_badge = QLabel("")
         self.quality_badge.setObjectName("QualityBadge")
         self.quality_badge.setVisible(False)
-        layout.addWidget(self.quality_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-
-        self.like_button = LikeButton()
-        self.like_button.clicked.connect(self._on_like)
-        layout.addWidget(self.like_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.quality_badge.setFixedHeight(BADGE_HEIGHT)
+        self.quality_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        meta_row.addWidget(self.quality_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        titles.addLayout(meta_row)
+        layout.addLayout(titles, 1)
         return panel
+
+    def _transport_button(
+        self,
+        name: str,
+        tooltip: str,
+        icon: QIcon,
+        slot,
+    ) -> QPushButton:
+        button = QPushButton()
+        button.setObjectName(name)
+        button.setIcon(icon)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedSize(ICON_BUTTON, ICON_BUTTON)
+        button.setIconSize(QSize(ICON_BUTTON - 16, ICON_BUTTON - 16))
+        button.clicked.connect(slot)
+        return button
 
     def _build_transport(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("Transport")
-        panel.setMinimumWidth(300)
+        panel.setMinimumWidth(TRANSPORT_MIN_WIDTH)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(2)
+        column.setSpacing(SPACE_MD)
 
         buttons = QHBoxLayout()
-        buttons.setSpacing(14)
+        buttons.setSpacing(SPACE_MD)
         buttons.addStretch(1)
-        self.prev_button = QPushButton("⏮")
-        self.prev_button.setObjectName("TransportButton")
-        self.prev_button.setToolTip("Предыдущий трек")
-        self.prev_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.prev_button.setFixedSize(36, 36)
-        self.prev_button.clicked.connect(self._controller.prev)
+        self.shuffle_button = self._transport_button(
+            "ShuffleButton", "Перемешать", shuffle_icon(ICON_BUTTON - 12), self._on_shuffle
+        )
+        buttons.addWidget(self.shuffle_button)
+        self.prev_button = self._transport_button(
+            "TransportButton",
+            "Предыдущий трек",
+            skip_icon(ICON_BUTTON - 12, backwards=True),
+            self._controller.prev,
+        )
         buttons.addWidget(self.prev_button)
 
-        self.play_button = QPushButton("▶")
+        self.play_button = QPushButton()
         self.play_button.setObjectName("PlayButton")
+        self.play_button.setIcon(play_icon(18))
+        self.play_button.setIconSize(QSize(18, 18))
         self.play_button.setToolTip("Играть / пауза")
         self.play_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_button.setFixedSize(PLAY_BUTTON_SIZE, PLAY_BUTTON_SIZE)
         self.play_button.clicked.connect(self._on_play)
         buttons.addWidget(self.play_button)
 
-        self.next_button = QPushButton("⏭")
-        self.next_button.setObjectName("TransportButton")
-        self.next_button.setToolTip("Следующий трек")
-        self.next_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.next_button.setFixedSize(36, 36)
-        self.next_button.clicked.connect(self._controller.next)
+        self.next_button = self._transport_button(
+            "TransportButton",
+            "Следующий трек",
+            skip_icon(ICON_BUTTON - 12),
+            self._controller.next,
+        )
         buttons.addWidget(self.next_button)
+        self.repeat_button = self._transport_button(
+            "RepeatButton", "Повтор", repeat_icon(ICON_BUTTON - 12), self._on_repeat
+        )
+        buttons.addWidget(self.repeat_button)
         buttons.addStretch(1)
         column.addLayout(buttons)
 
         seek_row = QHBoxLayout()
-        seek_row.setSpacing(10)
+        seek_row.setSpacing(SPACE_MD)
         self.position_label = QLabel("0:00")
         self.position_label.setObjectName("TimeLabel")
-        self.position_label.setFixedWidth(38)
+        self.position_label.setFixedWidth(TIME_LABEL_WIDTH)
         self.position_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         seek_row.addWidget(self.position_label)
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
         self.seek_slider.setObjectName("SeekSlider")
         self.seek_slider.setToolTip("Перемотка")
         self.seek_slider.setRange(0, 0)
+        self.seek_slider.setFixedHeight(SEEK_ROW_HEIGHT)
         self.seek_slider.setSingleStep(SEEK_STEP_MS)
         self.seek_slider.sliderMoved.connect(self._on_seek_moved)
         self.seek_slider.sliderReleased.connect(self._on_seek_released)
         seek_row.addWidget(self.seek_slider, 1)
         self.duration_label = QLabel("0:00")
         self.duration_label.setObjectName("TimeLabel")
-        self.duration_label.setFixedWidth(38)
+        self.duration_label.setFixedWidth(TIME_LABEL_WIDTH)
         seek_row.addWidget(self.duration_label)
         column.addLayout(seek_row)
         return panel
@@ -373,25 +537,30 @@ class MainWindow(QMainWindow):
     def _build_volume_panel(self) -> QWidget:
         self.volume_panel = VolumePanel()
         self.volume_panel.setObjectName("VolumePanel")
-        self.volume_panel.setFixedWidth(SIDE_PANEL_WIDTH)
+        self.volume_panel.setFixedWidth(PLAYER_RIGHT_WIDTH)
+        self.volume_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.volume_panel.setToolTip("Колесо мыши — громкость")
         layout = QHBoxLayout(self.volume_panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        layout.addStretch(1)
+        layout.setSpacing(SPACE_MD)
 
-        self.visualizer_button = QPushButton("Спектр")
+        # The visualiser mode is an icon, not a word: 240px has to hold a button,
+        # a speaker and a slider, and the tooltip still names the mode.
+        self.visualizer_button = QPushButton()
         self.visualizer_button.setObjectName("ModeButton")
         self.visualizer_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.visualizer_button.setToolTip("Переключить визуализатор")
+        self.visualizer_button.setToolTip(MODE_BUTTON_TOOLTIP)
+        self.visualizer_button.setCheckable(True)
+        self.visualizer_button.setFixedSize(ICON_BUTTON, ICON_BUTTON)
         self.visualizer_button.clicked.connect(self.cycle_visualizer)
         layout.addWidget(self.visualizer_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addStretch(1)
 
-        self.mute_button = QPushButton("🔊")
+        self.mute_button = QPushButton()
         self.mute_button.setObjectName("TransportButton")
-        self.mute_button.setToolTip("Выключить звук")
         self.mute_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.mute_button.setFixedSize(32, 32)
+        self.mute_button.setFixedSize(ICON_BUTTON, ICON_BUTTON)
+        self.mute_button.setIconSize(QSize(ICON_BUTTON - 16, ICON_BUTTON - 16))
         self.mute_button.clicked.connect(self._on_mute)
         layout.addWidget(self.mute_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -400,11 +569,12 @@ class MainWindow(QMainWindow):
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setSingleStep(VOLUME_STEP)
         self.volume_slider.setPageStep(VOLUME_STEP * 2)
-        self.volume_slider.setFixedWidth(96)
+        self.volume_slider.setFixedWidth(VOLUME_SLIDER_WIDTH)
         self.volume_slider.setToolTip("Громкость")
         self.volume_slider.valueChanged.connect(self._on_volume)
         layout.addWidget(self.volume_slider, 0, Qt.AlignmentFlag.AlignVCenter)
         self.volume_panel.wheel_step.connect(self._nudge_volume)
+        self._set_mute_icon(False)
         return self.volume_panel
 
     def _connect_controller(self) -> None:
@@ -422,6 +592,9 @@ class MainWindow(QMainWindow):
         controller.wave_error.connect(self._show_error)
         settings: SettingsPage = self.pages["settings"]  # type: ignore[assignment]
         settings.visualizer_changed.connect(self.set_visualizer_mode)
+        # A click on the stage changes the style behind the button, so the icon
+        # and the tooltip follow it in both directions.
+        self.wave_page.visualizer_mode_changed.connect(lambda _mode: self._refresh_mode_button())
         self.show_page("wave")
 
     def _install_shortcuts(self) -> None:
@@ -471,10 +644,10 @@ class MainWindow(QMainWindow):
     def set_profile(self, login: str, detail: str = "") -> None:
         """Show the account card: name, hint and the gold «Плюс» badge."""
         text = login or "Не авторизован"
-        self.profile_label.setText(text)
+        self._set_elided(self.profile_label, "_profile_text", text)
         signed_in = bool(login)
         hint = detail or ("" if signed_in else "Войдите, чтобы слушать")
-        self.profile_hint.setText(hint)
+        self._set_elided(self.profile_hint, "_profile_hint_text", hint)
         self.plus_badge.setVisible(bool(detail) and signed_in)
         self.logout_button.setEnabled(signed_in)
 
@@ -482,14 +655,37 @@ class MainWindow(QMainWindow):
 
     def set_visualizer_mode(self, mode: str) -> str:
         result = self.wave_page.set_visualizer_mode(mode)
-        self.visualizer_button.setText(VISUALIZER_LABELS.get(result, result))
+        self._refresh_mode_button()
         return result
 
     def cycle_visualizer(self) -> str:
-        modes = list(VISUALIZER_LABELS)
-        current = self.wave_page.visualizer.mode
-        index = modes.index(current) if current in modes else 0
-        return self.set_visualizer_mode(modes[(index + 1) % len(modes)])
+        """Advance the stage to the next style, from the button or a click."""
+        return self.set_visualizer_mode(self.wave_page.visualizer.cycle_mode())
+
+    def _refresh_mode_button(self) -> None:
+        """Keep the mode button's icon and tooltip in step with the stage."""
+        mode = self.wave_page.visualizer.mode
+        self.visualizer_button.setIcon(visualizer_icon(mode, ICON_BUTTON - 12))
+        label = VISUALIZER_LABELS.get(mode, mode)
+        self.visualizer_button.setToolTip(f"{MODE_BUTTON_TOOLTIP}: {label}")
+        self.visualizer_button.setChecked(mode == "circular")
+
+    def _on_shuffle(self) -> None:
+        self._controller.toggle_shuffle()
+        self._refresh_queue_buttons()
+
+    def _on_repeat(self) -> None:
+        self._controller.cycle_repeat()
+        self._refresh_queue_buttons()
+
+    def _refresh_queue_buttons(self) -> None:
+        """Show the shuffle and repeat state as lit or unlit buttons."""
+        shuffle = self._controller.shuffle
+        self.shuffle_button.setChecked(shuffle)
+        self.shuffle_button.setToolTip("Перемешать: вкл" if shuffle else "Перемешать")
+        repeat = self._controller.repeat
+        self.repeat_button.setChecked(repeat != "off")
+        self.repeat_button.setToolTip(f"Повтор: {REPEAT_LABELS.get(repeat, repeat)}")
 
     def _on_play(self) -> None:
         if self._controller.current is None:
@@ -568,29 +764,35 @@ class MainWindow(QMainWindow):
                 accent.style().polish(accent)
 
     def _refresh_quality(self) -> None:
-        """The badge next to the title: lossless, quality name or bitrate."""
+        """The badge next to the title: FLAC for lossless, HQ otherwise."""
         track = self._controller.current
         text = quality_badge(track)
         self.quality_badge.setText(text)
         self.quality_badge.setVisible(bool(text))
+        self.quality_badge.setToolTip(quality_detail(track))
+        lossless = bool(track is not None and getattr(track, "lossless", False))
+        self.quality_badge.setProperty("lossless", "true" if lossless else "false")
+        self.quality_badge.style().unpolish(self.quality_badge)
+        self.quality_badge.style().polish(self.quality_badge)
 
     def _refresh_all(self) -> None:
         self._refresh_track()
         self._refresh_state()
         self._refresh_volume()
         self._refresh_seek()
+        self._refresh_queue_buttons()
         self.set_visualizer_mode(self._config.get_visualizer())
 
     def _refresh_track(self) -> None:
         track = self._controller.current
         if track is None:
-            self.title_label.setText("Ничего не играет")
-            self.artist_label.setText("")
+            self._set_elided(self.title_label, "_title_text", "Ничего не играет")
+            self._set_elided(self.artist_label, "_artist_text", "")
             self._refresh_quality()
             self._refresh_like()
             return
-        self.title_label.setText(track.title)
-        self.artist_label.setText(track.artists_name or track.album)
+        self._set_elided(self.title_label, "_title_text", track.title)
+        self._set_elided(self.artist_label, "_artist_text", track.artists_name or track.album)
         self._refresh_quality()
         self._refresh_like()
         self._refresh_lists(track.id)
@@ -614,14 +816,16 @@ class MainWindow(QMainWindow):
 
     def _refresh_state(self) -> None:
         state = self._controller.state
-        if state == PlaybackState.PLAYING:
-            self.play_button.setText("⏸")
-        else:
-            self.play_button.setText("▶")
+        playing = state == PlaybackState.PLAYING
+        self.play_button.setIcon(pause_icon(18) if playing else play_icon(18))
         has_track = self._controller.current is not None
         self.play_button.setEnabled(has_track or state != PlaybackState.PAUSED)
         self.prev_button.setEnabled(has_track)
         self.next_button.setEnabled(has_track)
+
+    def _set_mute_icon(self, muted: bool) -> None:
+        self.mute_button.setIcon(speaker_icon(ICON_BUTTON - 16, muted=muted))
+        self.mute_button.setToolTip("Включить звук" if muted else "Выключить звук")
 
     def _refresh_volume(self) -> None:
         volume = self._controller.volume
@@ -629,7 +833,7 @@ class MainWindow(QMainWindow):
             blocked = self.volume_slider.blockSignals(True)
             self.volume_slider.setValue(volume)
             self.volume_slider.blockSignals(blocked)
-        self.mute_button.setText("🔇" if volume == 0 else "🔊")
+        self._set_mute_icon(volume == 0)
 
     def _refresh_seek(self) -> None:
         duration = self._controller.duration_ms
@@ -672,8 +876,14 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._config.set_volume(self._controller.volume)
         self._config.set_visualizer(self.wave_page.visualizer.mode)
+        self._config.set_shuffle(self._controller.shuffle)
+        self._config.set_repeat(self._controller.repeat)
         self.shutdown()
         super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._refresh_elided_texts()
 
     def restore_page(self) -> str:
         """Show the page the user left open last time."""
