@@ -5,7 +5,7 @@ typing never blocks the GUI; the page renders whatever ``search_ready`` reports
 and shows ``search_failed`` in the status line.
 
 The query is a single full-width field with a magnifier inside it: there is no
-«Найти» button, because a search box that fires on Enter *and* on a 400ms pause
+«Найти» button, because a search box that fires on Enter *and* on a 500ms pause
 while typing is one control instead of two, and it gives the results the whole
 width of the page.  The tabs are a segmented control, and the results share the
 single frame of :class:`ui.widgets.results_panel.ResultsPanel`, which is what
@@ -38,14 +38,25 @@ SECTION_TITLES = {
 }
 SECTION_ORDER = ("tracks", "albums", "artists", "playlists")
 MIN_QUERY_LENGTH = 1
-DEBOUNCE_MS = 400
-"""How long the field stays quiet before a query is sent on its own."""
+DEBOUNCE_MS = 500
+"""How long the field stays quiet before a query is sent on its own.
+
+Half a second is long enough that a normal typing burst is one request and
+short enough that the field does not feel stuck while the user is still
+deciding what to type.  Pressing Enter skips the wait entirely.
+"""
 
 SEARCH_ICON_SIZE = 18
 
 
 class SearchPage(QWidget):
-    """One full-width search field plus a segmented switch per result section."""
+    """One full-width search field plus a segmented switch per result section.
+
+    A query is sent on Enter or after a :data:`DEBOUNCE_MS` pause, never per
+    keystroke.  Answers are matched against the field before they are drawn, so
+    a slow request cannot repaint the list with results the user has already
+    replaced.
+    """
 
     track_activated = Signal(object)
     search_requested = Signal(str)
@@ -58,6 +69,8 @@ class SearchPage(QWidget):
         super().__init__(parent)
         self._controller = controller
         self._last_query: str = ""
+        self._generation = 0
+        """Newest request this page asked for; older answers are dropped."""
         self._build_ui()
         controller.service.search_ready.connect(self._on_ready)
         controller.service.search_failed.connect(self._on_failed)
@@ -142,6 +155,10 @@ class SearchPage(QWidget):
         started = self._controller.service.search(text)
         if not started:
             self.status_label.setText("Поиск недоступен")
+        else:
+            # Remember which request this page is waiting for, so a slow answer
+            # to an earlier query cannot repaint the list behind the user's back.
+            self._generation = self._controller.service.last_search_generation
         return started
 
     # -- slots --------------------------------------------------------------
@@ -162,7 +179,17 @@ class SearchPage(QWidget):
         self.track_activated.emit(track)
         self._controller.play_track(track)
 
+    def _is_stale(self, results: object) -> bool:
+        """Whether ``results`` answer a query the field has already left behind."""
+        query = str(getattr(results, "query", "") or self.query)
+        if query != self.query:
+            return True
+        generation = int(getattr(results, "generation", 0) or 0)
+        return bool(generation) and generation < self._generation
+
     def _on_ready(self, results: object) -> None:
+        if self._is_stale(results):
+            return
         query = str(getattr(results, "query", "") or self.query)
         counts = {
             "tracks": len(getattr(results, "tracks", ()) or ()),

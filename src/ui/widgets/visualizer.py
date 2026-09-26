@@ -36,7 +36,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from ui.theme import ACCENT, BORDER, PANEL, SURFACE, TEXT, WAVE_PINK
+from ui.theme import ACCENT, BORDER, PANEL, SURFACE, TEXT, WAVE_PINK, on_theme_changed, token
 
 FRAME_INTERVAL_MS = round(1000 / 60)
 DEFAULT_BANDS = 64
@@ -55,8 +55,71 @@ PEAK_COLOR = QColor(TEXT)
 PEAK_COLOR.setAlpha(210)
 IDLE_LEVEL = 0.045
 IDLE_SPEED = 0.0016
-MODE_ORDER = ("circular", "spectrum", "wave")
+MODE_ORDER = ("circular", "spectrum", "wave", "meters")
 """The order a click walks through, starting at the stage's own style."""
+
+
+def refresh_theme_colours() -> None:
+    """Re-read the frame colours the painters use from the active theme.
+
+    These names are read in a dozen ``paintEvent`` methods, so they are module
+    level rather than threaded through every call.  That makes them snapshots, so
+    this is registered with the theme: a style switch has to re-read them or the
+    canvas would stay Obsidian inside a Cyberpunk window.
+    """
+    global BACKGROUND, BASELINE, ACCENT_LOW, ACCENT_HIGH, PEAK_COLOR
+    BACKGROUND = QColor(token("PANEL"))
+    BASELINE = QColor(token("BORDER"))
+    ACCENT_LOW = QColor(token("WAVE_PINK"))
+    ACCENT_HIGH = QColor(token("ACCENT"))
+    peak = QColor(token("TEXT"))
+    peak.setAlpha(210)
+    PEAK_COLOR = peak
+
+
+on_theme_changed(lambda _name: refresh_theme_colours())
+
+VU_DECIBELS = (-54.0, 6.0)
+"""The dB window the meters show, in the order a mixing desk uses.
+
+The scale is the one a hardware meter uses: the whole range sits near 0 dBFS so
+the needle spends its travel where music actually is, and the bottom is not
+minus infinity, because a meter whose bottom is silent teaches the eye nothing.
+"""
+
+VU_FLOOR = 0.0
+"""Linear amplitude the meter shows as its lowest tick."""
+
+VU_CHANNELS = 2
+"""Left and right; the engine publishes an interleaved stereo frame."""
+
+
+def amplitude_to_decibels(amplitude: float) -> float:
+    """Convert a linear amplitude to dBFS, where silence is minus infinity.
+
+    ``math.log10(0.0)`` raises, and silence is the most common input a meter
+    ever sees - between tracks, on a fade-out, on a gapless handover - so the
+    floor is returned instead of a crash.
+    """
+    value = clamp(float(amplitude))
+    if value <= VU_FLOOR:
+        return math.inf
+    return 20.0 * math.log10(value)
+
+
+def decibel_to_level(decibels: float) -> float:
+    """Map a dB reading onto the 0..1 travel of a meter needle.
+
+    Clamped on both ends: below the floor the needle is at rest, above the
+    ceiling it is pinned, and a value in between is placed by its position in
+    the dB window rather than linearly in amplitude, because a linear amplitude
+    meter spends nine tenths of its travel on the quietest two percent of the
+    range.
+    """
+    low, high = VU_DECIBELS
+    if not math.isfinite(decibels):
+        return 0.0
+    return clamp((float(decibels) - low) / (high - low))
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -97,6 +160,55 @@ def fit_wave(values: Sequence[float], size: int = WAVE_POINTS) -> list[float]:
     if len(clipped) < size:
         clipped.extend([0.0] * (size - len(clipped)))
     return clipped
+
+
+def bar_layout(count: int, width: float) -> tuple[float, float]:
+    """Even ``(bar_width, gap)`` that fill ``width`` exactly.
+
+    The gap used to come from a fixed divisor, so a narrow stage made the bars
+    wider than their slot and pushed the top of the spectrum off the right edge.
+    Deriving it from what is actually available keeps every bar on screen at any
+    width, and dropping the outer margins lets the first and last bar reach the
+    edges instead of leaving a fifth of the display unused. A stage too narrow
+    to hold a pixel per band gets sub-pixel bars rather than bars that overrun it.
+    """
+    bars = max(1, int(count))
+    room = max(float(width), 1.0)
+    gap = min(max(room // 240.0, 0.0), room / bars * 0.4)
+    bar_width = (room - gap * (bars - 1)) / bars
+    return bar_width, gap
+
+
+def mirrored_rays(
+    values: Sequence[float],
+    spin: float = 0.0,
+    axis: float = 90.0,
+) -> list[tuple[float, float]]:
+    """``(angle, length)`` per band, mirrored about the axis through the bass.
+
+    A ring that walks the spectrum once is a readable circle, but it spends half
+    its circumference on the treble alone, so a bass-heavy track lights up a
+    short arc and leaves the rest dark - the same dead half as the bars, just
+    wrapped round a disc. Walking each band *and its partner from the other end*
+    puts the full range on both sides of the axis, so the left half mirrors the
+    right, the bass meets its treble on the axis and every band has a partner
+    carrying the same length.
+    """
+    count = len(values)
+    if count == 0:
+        return []
+    span = 360.0 / count
+    start = axis + spin
+    rays: list[tuple[float, float]] = []
+    for index in range(count):
+        partner = count - 1 - index
+        pair = min(index, partner)
+        # One length per pair: max, not mean, so a band does not get dimmed by
+        # its quieter mirror and the two sides stay identical.
+        length = max(clamp(float(values[index])), clamp(float(values[partner])))
+        side = 1.0 if index <= partner else -1.0
+        rays.append((start + side * pair * span, length))
+    return rays
 
 
 def idle_target(index: int, size: int, phase: float) -> float:
@@ -246,6 +358,132 @@ class WaveSmoother:
         self._values = [0.0] * self._size
 
 
+class LevelFollower:
+    """Per-channel level meter state: smoothed value plus a held peak cap.
+
+    A VU meter is not a spectrum.  It answers «how loud is it now», so the
+    follower runs on the RMS of a frame rather than on a single bin, and it keeps
+    a peak cap that falls slowly and a needle that falls faster - the same
+    attack/release shape as :class:`Smoother`, on a dB scale.
+    """
+
+    PEAK_ATTACK = 0.9
+    PEAK_FALL = 0.006
+    REST = 0.0005
+    """Below this a needle is sub-pixel, so it is snapped to true silence."""
+
+    def __init__(self, channels: int = 2) -> None:
+        self._channels = max(1, int(channels))
+        self._values = [0.0] * self._channels
+        self._peaks = [0.0] * self._channels
+        self._decays = [0.0] * self._channels
+
+    @property
+    def channels(self) -> int:
+        return self._channels
+
+    @property
+    def values(self) -> list[float]:
+        """The smoothed level of each channel, 0..1 on the meter scale."""
+        return self._values
+
+    @property
+    def peaks(self) -> list[float]:
+        return self._peaks
+
+    @property
+    def decays(self) -> list[float]:
+        """The overlay segments lit while a level decays, 0..1 on the meter scale."""
+        return self._decays
+
+    def step(self, targets: Sequence[float]) -> list[float]:
+        for index in range(self._channels):
+            target = float(targets[index]) if index < len(targets) else 0.0
+            target = clamp(target)
+            current = self._values[index]
+            coefficient = DEFAULT_ATTACK if target > current else DEFAULT_RELEASE
+            self._values[index] = current + coefficient * (target - current)
+            peak = self._peaks[index]
+            self._peaks[index] = max(peak, self._values[index]) if target >= peak else peak - self.PEAK_FALL
+            if self._values[index] > 0.0:
+                self._decays[index] = min(1.0, self._decays[index] + 0.02)
+            else:
+                self._decays[index] = max(0.0, self._decays[index] - 0.05)
+        self._rest()
+        return self._values
+
+    def adopt(self, other: "LevelFollower") -> None:
+        """Take over another follower's motion state (style switches)."""
+        self._channels = max(self._channels, other.channels)
+        self._values = list(other._values) + [0.0] * (self._channels - len(other._values))
+        self._peaks = list(other._peaks) + [0.0] * (self._channels - len(other._peaks))
+        self._decays = list(other._decays) + [0.0] * (self._channels - len(other._decays))
+
+    def decay(self) -> list[float]:
+        for index in range(self._channels):
+            self._values[index] = smooth_step(self._values[index], 0.0, 0.2, 0.12)
+            self._peaks[index] = max(0.0, self._peaks[index] - self.PEAK_FALL)
+            self._decays[index] = max(0.0, self._decays[index] - 0.05)
+        self._rest()
+        return self._values
+
+    def _rest(self) -> None:
+        """Snap a vanishing needle to silence instead of chasing denormals.
+
+        An exponential release only approaches zero; left alone it would keep a
+        meter reading a level of 1e-30 forever, which is what «is the track
+        really silent?» should answer exactly.
+        """
+        for index in range(self._channels):
+            if self._values[index] < self.REST:
+                self._values[index] = VU_FLOOR
+            if self._peaks[index] < self.REST:
+                self._peaks[index] = VU_FLOOR
+            if self._decays[index] < self.REST:
+                self._decays[index] = VU_FLOOR
+
+    def reset(self) -> None:
+        self._values = [0.0] * self._channels
+        self._peaks = [0.0] * self._channels
+        self._decays = [0.0] * self._channels
+
+
+def frame_rms(values: Sequence[float]) -> float:
+    """Root-mean-square amplitude of one time-domain frame, 0..1.
+
+    RMS and not the peak sample: a needle that follows the tallest spike in a
+    512-sample window sits at full scale for almost any music, and reads as
+    broken.  The average power is what a listener perceives as loudness, and it
+    is the number a mixing desk shows.
+    """
+    count = len(values)
+    if count == 0:
+        return 0.0
+    total = 0.0
+    for value in values:
+        sample = float(value)
+        total += sample * sample
+    return clamp(math.sqrt(total / count))
+
+
+def channel_levels(values: Sequence[float], channels: int = 2) -> list[float]:
+    """Split one interleaved frame into per-channel dB levels.
+
+    Interleaving is the layout the engine publishes (``L R L R``), so an odd
+    count is a dropped final sample rather than a reason to shift every later
+    sample by one; the tail sample is counted into the last channel instead.
+    """
+    total = max(1, int(channels))
+    if not values:
+        return [VU_FLOOR] * total
+    samples = [float(value) for value in values]
+    buckets: list[list[float]] = [[] for _ in range(total)]
+    for index, sample in enumerate(samples):
+        buckets[index % total].append(sample)
+    levels = [amplitude_to_decibels(frame_rms(bucket)) for bucket in buckets]
+    return [decibel_to_level(level) for level in levels]
+
+
 class VisualizerBase(QWidget):
     """Data plumbing plus the 60 FPS repaint clock shared by all styles."""
 
@@ -262,6 +500,7 @@ class VisualizerBase(QWidget):
         self._wave = WaveSmoother()
         self._target_bands: list[float] = [0.0] * bands
         self._target_wave: list[float] = [0.0] * WAVE_POINTS
+        self._target_levels: list[float] = [VU_FLOOR] * VU_CHANNELS
         self._phase = 0.0
         self._active = False
         self._pending = False
@@ -280,6 +519,7 @@ class VisualizerBase(QWidget):
     def set_waveform(self, values: Sequence[float]) -> None:
         """Feed a time-domain frame."""
         self._target_wave = fit_wave(values, self._wave.size)
+        self._target_levels = channel_levels(values, VU_CHANNELS)
         self._active = True
         self._pending = True
 
@@ -298,9 +538,13 @@ class VisualizerBase(QWidget):
         self._wave.adopt(other._wave.values)
         self._target_bands = list(other._target_bands)
         self._target_wave = list(other._target_wave)
+        self._target_levels = list(other._target_levels)
         self._phase = other._phase
         self._active = other._active
         self._pending = other._pending
+        levels = getattr(self, "_levels", None)
+        if isinstance(levels, LevelFollower) and isinstance(getattr(other, "_levels", None), LevelFollower):
+            levels.adopt(other._levels)
         self.update()
 
     @property
@@ -312,6 +556,10 @@ class VisualizerBase(QWidget):
         self._wave.reset()
         self._target_bands = [0.0] * self._spectrum.size
         self._target_wave = [0.0] * self._wave.size
+        self._target_levels = [VU_FLOOR] * VU_CHANNELS
+        levels = getattr(self, "_levels", None)
+        if isinstance(levels, LevelFollower):
+            levels.reset()
         self._phase = 0.0
         self.update()
 
@@ -356,12 +604,17 @@ class VisualizerBase(QWidget):
     def advance(self) -> None:
         """Move the animation one frame: towards the data, or breathing."""
         self._phase += IDLE_SPEED
+        levels = getattr(self, "_levels", None)
         if self._active:
             self._spectrum.step(self._target_bands)
             self._wave.step(self._target_wave)
+            if isinstance(levels, LevelFollower):
+                levels.step(self._target_levels)
         else:
             self._spectrum.idle(self._phase)
             self._wave.decay()
+            if isinstance(levels, LevelFollower):
+                levels.decay()
         self._pending = False
 
     def _paint_background(self, painter: QPainter) -> None:
@@ -391,12 +644,11 @@ class BarsVisualizer(VisualizerBase):
         count = len(values)
         if count == 0:
             return
-        gap = max(2, width // 240)
-        bar_width = max(2.0, (width - gap * (count + 1)) / count)
+        bar_width, gap = bar_layout(count, width)
         gradient = accent_gradient(float(height))
         painter.setPen(Qt.PenStyle.NoPen)
         for index, value in enumerate(values):
-            x = gap + index * (bar_width + gap)
+            x = index * (bar_width + gap)
             bar_height = max(2.0, value * (height - 16))
             painter.setBrush(gradient)
             painter.drawRoundedRect(
@@ -483,6 +735,9 @@ class RadialVisualizer(VisualizerBase):
     """Two passes: the glow, then the core."""
     SPIN = 0.00042
     """Rotation per frame, so the sweep never freezes into a static starburst."""
+    MIRROR_AXIS = 90.0
+    """Degrees, pointing down in Qt: the bass sits on the axis and the fan
+    mirrors itself around it, so both sides of the ring carry the whole range."""
 
     def __init__(self, parent: QWidget | None = None, bands: int = DEFAULT_BANDS) -> None:
         super().__init__(parent, bands)
@@ -540,11 +795,9 @@ class RadialVisualizer(VisualizerBase):
         spin: float,
     ) -> None:
         """The burst: one ray per band, glow pass first, then the bright core."""
-        count = len(values)
-        if count == 0:
+        rays = mirrored_rays(values, spin, self.MIRROR_AXIS)
+        if not rays:
             return
-        span = math.tau / count
-        angle0 = math.radians(spin)
         passes = ((7.0, 46), (2.0, 235))
         for thickness, alpha in passes:
             painter.setPen(
@@ -555,8 +808,8 @@ class RadialVisualizer(VisualizerBase):
                     Qt.PenCapStyle.RoundCap,
                 )
             )
-            for index, value in enumerate(values):
-                angle = angle0 + index * span
+            for angle_degrees, value in rays:
+                angle = math.radians(angle_degrees)
                 length = inner + max(0.0, min(1.0, value)) * reach
                 painter.drawLine(
                     center,
@@ -589,10 +842,114 @@ class RadialVisualizer(VisualizerBase):
         painter.drawPath(path)
 
 
+class MetersVisualizer(VisualizerBase):
+    """A stereo level meter: one bar per channel on a dB scale.
+
+    The other three styles show *what* the music contains - its spectrum, its
+    shape, its spread.  This one shows *how loud* it is, which is the question a
+    listener asks when a mix feels wrong, so it is drawn as the instrument it
+    imitates: a horizontal scale with ticks, a lit bar per channel, a held peak
+    cap and a decaying trail behind it.
+    """
+
+    mode = "meters"
+    CHANNELS = ("L", "R")
+    SEGMENTS = 28
+    TICK_DECIBELS = (-48.0, -36.0, -24.0, -18.0, -12.0, -6.0, 0.0)
+    PADDING = 18.0
+    ROW_GAP = 10.0
+    LABEL_WIDTH = 18.0
+
+    def __init__(self, parent: QWidget | None = None, bands: int = DEFAULT_BANDS) -> None:
+        super().__init__(parent, bands)
+        self._levels = LevelFollower(len(self.CHANNELS))
+
+    def _paint(self, painter: QPainter) -> None:
+        width = float(self.width())
+        height = float(self.height())
+        left = self.PADDING + self.LABEL_WIDTH
+        right = width - self.PADDING
+        span = right - left
+        if span <= 0.0:
+            return
+        channels = self._levels.channels
+        row = (height - self.ROW_GAP * (channels - 1)) / channels
+        if row < 12.0:
+            return
+        for index in range(channels):
+            top = index * (row + self.ROW_GAP)
+            track = QRectF(left, top, span, row)
+            self._paint_scale(painter, track)
+            self._paint_channel(painter, track, index)
+            self._paint_label(painter, top, row, self.CHANNELS[index] if index < len(self.CHANNELS) else "")
+
+    def _paint_scale(self, painter: QPainter, track: QRectF) -> None:
+        """The dB ticks behind the bar: the ruler that makes it a meter."""
+        painter.setPen(QPen(BASELINE, 1.0))
+        painter.drawRect(track.adjusted(0.0, 0.0, -1.0, -1.0))
+        for decibels in self.TICK_DECIBELS:
+            x = track.left() + track.width() * decibel_to_level(decibels)
+            painter.setPen(QPen(QColor(BORDER), 1.0))
+            painter.drawLine(int(x), int(track.top() + 1), int(x), int(track.bottom() - 1.0))
+
+    def _paint_channel(self, painter: QPainter, track: QRectF, index: int) -> None:
+        """One channel: lit segments, the decaying trail and the held peak cap."""
+        value = self._levels.values[index]
+        decay = self._levels.decays[index]
+        peak = self._levels.peaks[index]
+        step_width = track.width() / self.SEGMENTS
+        painter.save()
+        painter.setClipRect(track.adjusted(1.0, 1.0, -1.0, -1.0))
+        for step in range(self.SEGMENTS):
+            edge = (step + 1) / self.SEGMENTS
+            filled = edge <= value
+            trailing = not filled and edge <= decay
+            if not filled and not trailing:
+                continue
+            cell = QRectF(
+                track.left() + step * step_width,
+                track.top() + 1.0,
+                max(1.0, step_width - 1.5),
+                max(1.0, track.height() - 2.0),
+            )
+            painter.setBrush(self._segment_colour(step / self.SEGMENTS, trailing))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(cell, 2.0, 2.0)
+        painter.restore()
+        if peak > 0.01:
+            x = track.left() + track.width() * clamp(peak)
+            painter.setPen(QPen(PEAK_COLOR, 1.6))
+            painter.drawLine(int(x), int(track.top()), int(x), int(track.bottom()))
+
+    @staticmethod
+    def _segment_colour(fraction: float, trailing: bool) -> QColor:
+        """The heat ramp of one segment, dimmed when it is only a trail."""
+        if fraction < 0.62:
+            colour = QColor(ACCENT)
+        elif fraction < 0.85:
+            colour = QColor(ACCENT_MID)
+        else:
+            colour = QColor(WAVE_PINK)
+        colour.setAlpha(90 if trailing else 225)
+        return colour
+
+    def _paint_label(self, painter: QPainter, top: float, row: float, name: str) -> None:
+        """The channel letter in the gutter the rows leave on their left."""
+        if not name or row < 20.0:
+            return
+        painter.setPen(QPen(QColor(TEXT)))
+        painter.drawText(
+            QRectF(self.PADDING - 6.0, top, self.LABEL_WIDTH, row),
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            name,
+        )
+
+
 VISUALIZERS: dict[str, type[VisualizerBase]] = {
     BarsVisualizer.mode: BarsVisualizer,
     WaveVisualizer.mode: WaveVisualizer,
     RadialVisualizer.mode: RadialVisualizer,
+    MetersVisualizer.mode: MetersVisualizer,
 }
 
 
@@ -603,7 +960,7 @@ def create_visualizer(kind: str, parent: QWidget | None = None) -> VisualizerBas
 
 
 class VisualizerStack(QWidget):
-    """Holds all three styles, feeds only the visible one and switches modes."""
+    """Holds every style, feeds only the visible one and switches modes."""
 
     mode_changed = Signal(str)
 
@@ -693,21 +1050,30 @@ __all__ = [
     "DEFAULT_PEAK_FALL",
     "DEFAULT_RELEASE",
     "FRAME_INTERVAL_MS",
+    "LevelFollower",
     "MODE_ORDER",
+    "MetersVisualizer",
     "RadialVisualizer",
     "Smoother",
     "VISUALIZERS",
+    "VU_CHANNELS",
+    "VU_DECIBELS",
     "VisualizerBase",
     "VisualizerStack",
     "WAVE_POINTS",
     "WaveSmoother",
     "WaveVisualizer",
     "accent_gradient",
+    "bar_layout",
+    "channel_levels",
     "clamp",
     "create_visualizer",
+    "decibel_to_level",
     "fit_bands",
     "fit_wave",
+    "frame_rms",
     "idle_target",
+    "mirrored_rays",
     "ray_gradient",
     "smooth_step",
     "update_peaks",

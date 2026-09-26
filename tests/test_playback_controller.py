@@ -284,8 +284,11 @@ class FakeClient:
         self.station_error: Exception | None = None
         self.download_error: Exception | None = None
         self.search_error: Exception | None = None
-        self.search_calls: list[tuple[str, int]] = []
+        self.search_calls: list[tuple[str, int, str]] = []
         self.liked_calls: list[tuple[str, object]] = []
+        self.hydrate_calls: list[tuple[str, ...]] = []
+        self.hydrate_error: Exception | None = None
+        self.full_tracks: list = []
         self.search_result: object = SimpleNamespace(tracks=(), albums=(), artists=(), playlists=())
         self.liked_tracks_result: object = SimpleNamespace(tracks=())
         self.liked_albums_result: object = SimpleNamespace(albums=())
@@ -365,7 +368,7 @@ class FakeClient:
 
     def search(self, text, page=0, type_="all", **kwargs):
         self.calls.append("search")
-        self.search_calls.append((text, page))
+        self.search_calls.append((text, page, type_))
         if self.search_error is not None:
             raise self.search_error
         return self.search_result
@@ -374,6 +377,16 @@ class FakeClient:
         self.calls.append("users_likes_tracks")
         self.liked_calls.append(("tracks", user_id))
         return self.liked_tracks_result
+
+    def tracks(self, track_ids, **kwargs):
+        self.calls.append("tracks")
+        self.hydrate_calls.append(tuple(track_ids))
+        if self.hydrate_error is not None:
+            raise self.hydrate_error
+        wanted = {str(item) for item in track_ids}
+        return SimpleNamespace(
+            tracks=[track for track in self.full_tracks if str(getattr(track, "id", "")) in wanted]
+        )
 
     def users_likes_albums(self, user_id=None, **kwargs):
         self.calls.append("users_likes_albums")
@@ -676,6 +689,105 @@ def test_transport(app: QApplication) -> None:
         check("toggle reloads track", rig.controller.current is not None)
         check("toggle reload state", rig.controller.state == PlaybackState.PLAYING)
         check("toggle reload position", rig.controller.position == 0)
+    finally:
+        rig.close()
+
+
+def test_gapless_prefetch_fires_once_at_eighty_percent(app: QApplication) -> None:
+    """The next link is fetched from the tail of the current track, exactly once."""
+    from core.yandex_service import GAPLESS_PREFETCH_RATIO
+
+    rig = Rig(app)
+    try:
+        check("gapless login", rig.login())
+        # Five tracks, so the near-end-of-queue rule stays out of the way and
+        # the 80% rule is the only thing that can fetch the next link.
+        tracks = [make_track(70 + index) for index in range(5)]
+        rig.controller.play_playlist(tracks, start_index=0)
+        check("gapless settles", rig.settle())
+        check("queue is long", rig.controller.remaining == 4)
+
+        rig.client.download_calls.clear()
+        rig.engine.advance_to(50000)
+        rig.controller._poll_position()
+        check("no fetch before the threshold", rig.client.download_calls == [])
+        rig.engine.advance_to(90000)
+        rig.controller._poll_position()
+        check("still below 80%", rig.client.download_calls == [])
+        check("the constant is the one asked for", abs(GAPLESS_PREFETCH_RATIO - 0.8) < 1e-9)
+
+        rig.engine.advance_to(180000)
+        rig.controller._poll_position()
+        check(
+            "fetches the next track at the tail",
+            wait_for(rig.app, lambda: bool(rig.client.download_calls)),
+        )
+        fetched = list(rig.client.download_calls)
+
+        # The position clock keeps firing every 200 ms: the request must not repeat.
+        for position in (150000, 160000, 170000, 179000):
+            rig.engine.advance_to(position)
+            rig.controller._poll_position()
+        check("does not fetch twice for one track", rig.client.download_calls == fetched)
+
+        # Playing the next track re-arms the trigger for the track after it.
+        rig.controller.next()
+        check("moved on", rig.settle())
+        rig.client.download_calls.clear()
+        rig.engine.advance_to(180000)
+        rig.controller._poll_position()
+        check("the queue is exhausted, nothing to fetch", rig.client.download_calls == [])
+
+        rig.controller.stop()
+        check("stop clears the marker", rig.controller._gapless_prefetched is None)
+    finally:
+        rig.close()
+
+
+def test_gapless_prefetch_ignores_a_missing_next_track(app: QApplication) -> None:
+    """A single-track queue must not spin looking for something to fetch."""
+    rig = Rig(app)
+    try:
+        check("solo login", rig.login())
+        rig.controller.play_playlist([make_track(80)], start_index=0)
+        check("solo settles", rig.settle())
+        rig.client.download_calls.clear()
+        rig.engine.advance_to(180000)
+        rig.controller._poll_position()
+        check("nothing queued after it", rig.client.download_calls == [])
+        check("no waiting duration", rig.controller.duration_ms > 0)
+
+        # An unknown duration cannot be 80% of anything, so no guess is made.
+        rig.controller._duration_ms = 0
+        rig.controller._poll_position()
+        check("an unknown duration never triggers", rig.client.download_calls == [])
+    finally:
+        rig.close()
+
+
+def test_gapless_prefetch_rearms_after_a_seek_back(app: QApplication) -> None:
+    """Jumping back to the start of a track lets the trigger fire again."""
+    rig = Rig(app)
+    try:
+        check("seek login", rig.login())
+        rig.controller.play_playlist([make_track(90 + index) for index in range(5)], start_index=0)
+        check("seek settles", rig.settle())
+        rig.client.download_calls.clear()
+        rig.engine.advance_to(180000)
+        rig.controller._poll_position()
+        check("fetched at the tail", wait_for(rig.app, lambda: bool(rig.client.download_calls)))
+        check("the trigger is marked", rig.controller._gapless_prefetched is not None)
+
+        check("seek back works", rig.controller.seek(0))
+        check("a rewind re-arms the trigger", rig.controller._gapless_prefetched is None)
+
+        # Reaching 80% again must not re-request: the link is warm in the cache.
+        rig.client.download_calls.clear()
+        rig.engine.advance_to(180000)
+        rig.controller._poll_position()
+        rig.settle()
+        check("a warm link is reused, not refetched", rig.client.download_calls == [])
+        check("and the trigger is marked again", rig.controller._gapless_prefetched is not None)
     finally:
         rig.close()
 

@@ -31,7 +31,10 @@ and libmpv aborts on a non-C numeric locale, so the engine pins it back to
 The analyzer itself is pure NumPy: a Hann-windowed ``rfft`` folded into 32 or
 64 logarithmic bands from 20 Hz to 20 kHz, emitted through
 :attr:`AudioEngine.spectrum_ready` / :attr:`AudioEngine.waveform_ready` at 60 Hz
-by a ``QTimer`` in the GUI thread.
+by a ``QTimer`` in the GUI thread. Raw band magnitudes are useless to a
+display - music is 30-50 dB louder in the bass than in the treble, so the bands
+are pre-emphasised with the logarithmic tilt of :func:`tilt_db` and mapped onto
+``[0, 1]`` by :func:`db_levels` before they leave this module.
 """
 
 from __future__ import annotations
@@ -55,6 +58,16 @@ from PySide6.QtCore import QObject, QTimer, Signal
 log = logging.getLogger(__name__)
 
 FFT_SIZE = 2048
+FFT_PADDING = 4
+"""Zero-padding factor of the FFT.
+
+The window itself decides the resolution, but the *reading* of a peak between
+two bins is only as good as the grid. At 44.1 kHz a bare 2048-point FFT steps
+21.5 Hz, which is wider than the first log bands (20-22.3 Hz at 64 bands), so
+every low band would report the level of whichever single bin happened to cover
+it. Padding to 8192 points costs one longer transform per frame and gives a
+5.4 Hz grid, which is fine enough to place a bass peak in its own band.
+"""
 MIN_FREQ = 20.0
 MAX_FREQ = 20_000.0
 BAND_CHOICES = (32, 64)
@@ -64,10 +77,23 @@ FRAME_INTERVAL_MS = round(1000 / 60)
 TAP_RATE = 44100
 TAP_CHANNELS = 2
 BYTES_PER_FRAME = TAP_CHANNELS * 2
-LOW_CUTOFF_HZ = 250.0
-LOW_RATE_HZ = 800
-LOW_FFT_SIZE = 512
-LOW_TAPS_PER_RATE = 2
+
+TILT_REF_HZ = 100.0
+"""Frequency the tilt curve leaves alone: 0 dB of pre-emphasis here."""
+TILT_TOP_HZ = 16_000.0
+"""Frequency that gets the full boost of :data:`TILT_GAIN_DB`."""
+TILT_GAIN_DB = 10.0
+"""How much the top of the spectrum is lifted, in dB (~4.5 dB per octave)."""
+DB_SPAN = 46.0
+"""How many dB below the reference band the display reaches zero."""
+REFERENCE_BANDS = 8
+"""How many of the loudest bands set the reference, so one hi-hat cannot dim all."""
+ABS_FLOOR = -78.0
+"""Below this the loudest band is noise and the whole frame reads as zero."""
+KNEE = 0.75
+"""Where the soft top starts, as a fraction of the reference-to-floor window."""
+GATE_WIDTH_DB = 8.0
+"""The gates fade in over this many dB instead of switching on."""
 
 AO_ENV = "YML_AUDIO_AO"
 HWACCEL_ENV = "YML_HWACCEL"
@@ -120,6 +146,9 @@ def detect_audio_output() -> str:
     return "pulse"
 
 
+_EDGES_CACHE: dict[tuple[int, float, float], np.ndarray] = {}
+
+
 def band_edges(
     n_bands: int,
     low: float = MIN_FREQ,
@@ -128,7 +157,13 @@ def band_edges(
     """Log-spaced band edges in Hz, length ``n_bands + 1``."""
     if n_bands < 1:
         raise ValueError("n_bands must be >= 1")
-    return np.geomspace(float(low), float(high), int(n_bands) + 1)
+    key = (int(n_bands), float(low), float(high))
+    cached = _EDGES_CACHE.get(key)
+    if cached is None:
+        cached = np.geomspace(float(low), float(high), int(n_bands) + 1)
+        _EDGES_CACHE[key] = cached
+    # A copy, so a caller that trims the array cannot poison the next frame.
+    return cached.copy()
 
 
 def normalize_bands(n_bands: int) -> int:
@@ -141,10 +176,88 @@ def normalize_bands(n_bands: int) -> int:
     raise ValueError("band count must be 32 or 64")
 
 
+def tilt_db(freqs: np.ndarray | float) -> np.ndarray:
+    """Pre-emphasis in dB for each frequency: flat to 100 Hz, +10 dB at 16 kHz.
+
+    Music falls off roughly 3-6 dB per octave, so a raw FFT leaves the top of
+    the spectrum an order of magnitude below the bass and the right half of the
+    display sits still. The ramp is logarithmic in frequency, which is the
+    shape the ear expects, and it never subtracts: frequencies below
+    :data:`TILT_REF_HZ` are left at 0 dB.
+    """
+    values = np.asarray(freqs, dtype=np.float64)
+    span = np.log10(TILT_TOP_HZ / TILT_REF_HZ)
+    ramp = np.clip(np.log10(np.maximum(values, 1e-6) / TILT_REF_HZ) / span, 0.0, 1.0)
+    return (TILT_GAIN_DB * ramp).astype(np.float32)
+
+
+def band_tilt_db(edges: np.ndarray) -> np.ndarray:
+    """The tilt of every band, read at the geometric centre of its edges."""
+    return tilt_db(np.sqrt(edges[:-1] * edges[1:]))
+
+
+def _smoothstep(value: np.ndarray) -> np.ndarray:
+    """Clamped smoothstep: the gate that turns on over dB instead of instantly."""
+    clamped = np.clip(value, 0.0, 1.0)
+    return clamped * clamped * (3.0 - 2.0 * clamped)
+
+
+def db_levels(decibels: np.ndarray, tilt: np.ndarray | float = 0.0) -> np.ndarray:
+    """Map band levels in dB onto ``[0, 1]``.
+
+    The reference is the mean of the loudest :data:`REFERENCE_BANDS` levels *of
+    the tilted spectrum*, not the single loudest band: the bass used to set it,
+    which is how a display ends up showing only its left half. Averaging a few
+    bands keeps one hi-hat or one snare from dimming everything else for a
+    frame, and only bands above :data:`ABS_FLOOR` get a vote, so the noise
+    between the notes cannot drag the reference down and take the music with it.
+
+    Two smoothstep gates ride on top. The bottom one fades the last
+    :data:`GATE_WIDTH_DB` of :data:`DB_SPAN` into zero, so a band sitting on the
+    noise does not flicker; the outer one fades a band in as it rises off
+    :data:`ABS_FLOOR`, so silence is dark instead of a random pattern. The top is
+    a ``tanh`` knee rather than a clip, which keeps the bands strictly ordered -
+    a clip would tie the loudest few at 1.0 and hide where in the spectrum the
+    music actually is.
+    """
+    bands = np.asarray(decibels, dtype=np.float32)
+    if bands.size == 0:
+        return bands
+    boosted = bands + np.asarray(tilt, dtype=np.float32)
+    weight = _smoothstep((boosted - ABS_FLOOR) / GATE_WIDTH_DB)
+    audible = weight > 0.0
+    if not audible.any():
+        return np.zeros_like(boosted)
+    # -inf sorts below every band, so the partition can only pick audible ones.
+    hidden = np.where(audible, boosted, -np.inf)
+    loudest = min(REFERENCE_BANDS, int(audible.sum()))
+    reference = float(np.partition(hidden, hidden.size - loudest)[hidden.size - loudest :].mean())
+    raw = (boosted - reference + DB_SPAN) / DB_SPAN
+    level = np.where(
+        raw <= KNEE,
+        raw,
+        KNEE + (1.0 - KNEE) * np.tanh((raw - KNEE) / (1.0 - KNEE)),
+    )
+    gate = _smoothstep((boosted - (reference - DB_SPAN)) / GATE_WIDTH_DB)
+    return (level * gate * weight).astype(np.float32)
+
+
 def _to_mono(block: np.ndarray) -> np.ndarray:
     if block.ndim == 2:
         return block.mean(axis=1, dtype=np.float32)
     return block.astype(np.float32, copy=False)
+
+
+_WINDOW_CACHE: dict[int, np.ndarray] = {}
+
+
+def _hann(size: int) -> np.ndarray:
+    """The Hann window of ``size``, built once instead of sixty times a second."""
+    cached = _WINDOW_CACHE.get(size)
+    if cached is None:
+        cached = np.hanning(size).astype(np.float32)
+        _WINDOW_CACHE[size] = cached
+    return cached
 
 
 def _windowed(block: np.ndarray, size: int) -> np.ndarray:
@@ -154,51 +267,46 @@ def _windowed(block: np.ndarray, size: int) -> np.ndarray:
     else:
         out = np.zeros(size, dtype=np.float32)
         out[-mono.size :] = mono
-    return out * np.hanning(size).astype(np.float32)
+    return out * _hann(size)
 
 
-_FIR_CACHE: dict[tuple[int, int], np.ndarray] = {}
+def _parabola(power: np.ndarray, bin_hz: float, frequency: np.ndarray) -> np.ndarray:
+    """Reconstruct the curve at ``frequency`` from the three samples around it.
+
+    A straight line between two samples can never exceed them, so a peak that
+    falls between samples would be reported at whichever sample happened to be
+    louder - up to half a grid step away, which at 30 Hz is most of a band. A
+    parabola through the three points around the target has its vertex between
+    them, so the peak lands where the peak is.
+    """
+    position = np.asarray(frequency, dtype=np.float64) / bin_hz
+    index = np.clip(np.floor(position).astype(np.int64), 1, power.size - 2)
+    offset = position - index
+    first, middle, last = power[index - 1], power[index], power[index + 1]
+    curvature = first - 2.0 * middle + last
+    value = middle + 0.5 * (last - first) * offset + 0.5 * curvature * offset * offset
+    return np.maximum(value, 0.0)
 
 
-def _lowpass_kernel(factor: int) -> np.ndarray:
-    """Windowed-sinc low-pass for integer decimation (cached per factor)."""
-    key = (factor, LOW_TAPS_PER_RATE)
-    cached = _FIR_CACHE.get(key)
-    if cached is not None:
-        return cached
-    taps = factor * LOW_TAPS_PER_RATE
-    n = np.arange(taps) - (taps - 1) / 2.0
-    kernel = np.sinc(n / factor) * np.hanning(taps)
-    kernel = kernel.astype(np.float32)
-    total = float(kernel.sum())
-    if total > 0:
-        kernel /= total
-    _FIR_CACHE[key] = kernel
-    return kernel
+def _band_peak(
+    power: np.ndarray,
+    bin_hz: float,
+    low: np.ndarray,
+    high: np.ndarray,
+    samples: int = 3,
+) -> np.ndarray:
+    """The loudest reconstruction inside each band, for bands narrower than a bin.
 
-
-def _low_band_spectrum(
-    mono: np.ndarray,
-    sample_rate: int,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """FFT of a decimated copy: ~1.5 Hz bins resolve 20-250 Hz bands."""
-    factor = max(1, int(sample_rate // LOW_RATE_HZ))
-    if factor == 1:
-        return np.empty(0, dtype=np.float32), np.empty(0), float(sample_rate)
-    filtered = np.convolve(mono, _lowpass_kernel(factor), mode="same")
-    usable = (filtered.size // factor) * factor
-    decimated = filtered[:usable:factor].astype(np.float32, copy=False)
-    size = LOW_FFT_SIZE
-    if decimated.size >= size:
-        block = decimated[-size:]
-    else:
-        block = np.zeros(size, dtype=np.float32)
-        block[-decimated.size :] = decimated
-    windowed = block * np.hanning(size).astype(np.float32)
-    magnitudes = np.abs(np.fft.rfft(windowed))
-    effective_rate = sample_rate / factor
-    freqs = np.fft.rfftfreq(size, d=1.0 / effective_rate)
-    return magnitudes, freqs, effective_rate
+    The first log bands are narrower than an FFT bin, so folding them would
+    report a neighbour's level (or tie with the next band) instead of their own.
+    Reading across the whole band rather than at one centre is what keeps a peak
+    on a band edge in the band that owns it: the peak sits inside exactly one
+    band, and that band samples closest to it.
+    """
+    span = (high - low)[:, None] / float(samples)
+    steps = np.arange(1, samples + 1, dtype=np.float64)[None, :]
+    candidates = _parabola(power, bin_hz, low[:, None] + span * steps)
+    return np.sqrt(candidates.max(axis=1))
 
 
 def _fold_bands(
@@ -206,18 +314,33 @@ def _fold_bands(
     freqs: np.ndarray,
     edges: np.ndarray,
 ) -> np.ndarray:
-    """Maximum magnitude per band over the FFT bins covered by each edge pair."""
+    """One level per band: mean power, or a reading at the centre when too narrow.
+
+    Mean power is what makes a band's level mean the same thing at 50 Hz and at
+    15 kHz: a wide band covers many bins and an average does not grow just
+    because there were more of them to be lucky in, which is exactly the bias a
+    per-band tilt is supposed to correct rather than double up on.
+    """
     n_bands = edges.size - 1
-    bands = np.zeros(n_bands, dtype=np.float32)
-    index = np.searchsorted(freqs, edges)
-    for band in range(n_bands):
-        start = int(index[band])
-        end = max(int(index[band + 1]), start + 1)
-        end = min(end, magnitudes.size)
-        start = min(start, magnitudes.size - 1)
-        if end > start:
-            bands[band] = magnitudes[start:end].max()
-    return bands
+    levels = np.zeros(n_bands, dtype=np.float32)
+    if magnitudes.size < 3:
+        return levels
+    power = np.square(magnitudes, dtype=np.float64)
+    bin_hz = float(freqs[1] - freqs[0])
+
+    # Bin range of every band, clipped to the transform, and how many bins it got.
+    index = np.clip(np.searchsorted(freqs, edges), 0, power.size)
+    start, end = index[:-1], index[1:]
+    wide = (end - start) >= 2
+    if wide.any():
+        totals = np.add.reduceat(power, start[wide])[: int(wide.sum())]
+        counts = (end - start)[wide]
+        # reduceat sums [start[i], start[i+1]), so the last band needs its own end.
+        totals[-1] = power[start[wide][-1] : end[wide][-1]].sum()
+        levels[wide] = np.sqrt(totals / counts).astype(np.float32)
+    if (~wide).any():
+        levels[~wide] = _band_peak(power, bin_hz, edges[:-1][~wide], edges[1:][~wide])
+    return levels
 
 
 def spectrum_bands(
@@ -228,36 +351,20 @@ def spectrum_bands(
 ) -> np.ndarray:
     """Fold an audio block into normalised log-frequency bands in [0, 1].
 
-    Bands below :data:`LOW_CUTOFF_HZ` are measured on a decimated copy of the
-    signal: a 2048-point FFT at 44.1 kHz has 21.5 Hz bins, which is wider than
-    the first log bands (20-22.3 Hz at 64 bands) and would smear bass content
-    into the wrong band.
+    One Hann-windowed FFT measures every band: the first log bands are narrower
+    than a bin, so they are read by interpolation instead of being folded, and
+    the transform is zero-padded by :data:`FFT_PADDING` so that grid is finer
+    than they are. The raw levels are pre-emphasised by :func:`band_tilt_db` and
+    mapped by :func:`db_levels`.
     """
     mono = _to_mono(block)
-    edges = band_edges(n_bands)
-    split = int(np.searchsorted(edges, LOW_CUTOFF_HZ, side="right")) - 1
-    split = max(0, min(n_bands, split))
-
-    bands = np.zeros(n_bands, dtype=np.float32)
-    if split > 0:
-        low_mag, low_freqs, _rate = _low_band_spectrum(mono, sample_rate)
-        if low_mag.size:
-            bands[:split] = _fold_bands(low_mag, low_freqs, edges[: split + 1])
-
     windowed = _windowed(mono, fft_size)
-    magnitudes = np.abs(np.fft.rfft(windowed))
-    freqs = np.fft.rfftfreq(fft_size, d=1.0 / float(sample_rate))
-    if split < n_bands:
-        bands[split:] = _fold_bands(magnitudes, freqs, edges[split:])
-
-    decibels = 20.0 * np.log10(bands + 1e-9)
-    peak = float(decibels.max())
-    if peak < -90.0:
-        return np.zeros(n_bands, dtype=np.float32)
-    loudness = float(np.clip((peak + 72.0) / 66.0, 0.0, 1.0))
-    relative = np.clip((decibels - peak + 54.0) / 54.0, 0.0, 1.0)
-    tilt = np.linspace(0.0, 0.12, n_bands, dtype=np.float32)
-    return np.clip(relative * (0.15 + 0.85 * loudness) * (1.0 + tilt), 0.0, 1.0).astype(np.float32)
+    padded = fft_size * FFT_PADDING
+    magnitudes = np.abs(np.fft.rfft(windowed, padded))
+    freqs = np.fft.rfftfreq(padded, d=1.0 / float(sample_rate))
+    edges = band_edges(n_bands)
+    levels = _fold_bands(magnitudes, freqs, edges)
+    return db_levels(20.0 * np.log10(levels + 1e-9), band_tilt_db(edges))
 
 
 def oscilloscope(block: np.ndarray, points: int = WAVE_POINTS) -> np.ndarray:

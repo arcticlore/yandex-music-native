@@ -644,6 +644,7 @@ class AuthService(QObject):
             "display_name": full_name,
             "full_name": account.full_name or full_name,
             "first_name": account.first_name or "",
+            "last_name": account.second_name or "",
             "avatar_url": AuthService._avatar_url(account, uid, login),
             "has_plus": has_plus,
             "subscription": "Яндекс Плюс" if has_plus else "Без подписки",

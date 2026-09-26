@@ -29,10 +29,21 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from ui.theme import ACCENT, TEXT, TEXT_DIM
+from ui.theme import token
 
 ICON_SIZE = 20
 STROKE = 1.7
+
+
+def _tone(name: str, colour: str | None) -> str:
+    """The caller's colour, or the named token of the active theme.
+
+    Icon factories take their colour as an optional argument, so a themed icon
+    asks for a token *name* and resolves it here at paint time.  A default
+    argument of ``TEXT_DIM`` would be a snapshot taken at import and would keep
+    drawing the old theme's ink after a switch.
+    """
+    return token(name) if colour is None else colour
 
 
 def _canvas(size: int, scale: float = 1.0) -> tuple[QPixmap, QPainter]:
@@ -63,8 +74,9 @@ def _pen(colour: str, width: float = STROKE) -> QPen:
 # -- individual glyphs -------------------------------------------------------
 
 
-def magnifier(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
-    """A search glyph: a lens and a handle."""
+def magnifier(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""A search glyph: a lens and a handle.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(_pen(colour))
@@ -79,8 +91,9 @@ def magnifier(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
     return _finish(pixmap, painter)
 
 
-def shuffle(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
-    """Two crossing arrows: the classic shuffle mark."""
+def shuffle(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""Two crossing arrows: the classic shuffle mark.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     top, bottom = box * 0.28, box * 0.72
@@ -111,8 +124,9 @@ def shuffle(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
     return _finish(pixmap, painter)
 
 
-def repeat(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
-    """A closed loop with an arrowhead: the classic repeat mark."""
+def repeat(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""A closed loop with an arrowhead: the classic repeat mark.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(_pen(colour))
@@ -133,8 +147,9 @@ def repeat(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
     return _finish(pixmap, painter)
 
 
-def speaker(size: int = ICON_SIZE, colour: str = TEXT_DIM, muted: bool = False) -> QIcon:
-    """A speaker body with sound waves, or a slash when muted."""
+def speaker(size: int = ICON_SIZE, colour: str | None = None, muted: bool = False) -> QIcon:
+    """""A speaker body with sound waves, or a slash when muted.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(_pen(colour))
@@ -169,8 +184,9 @@ def speaker(size: int = ICON_SIZE, colour: str = TEXT_DIM, muted: bool = False) 
     return _finish(pixmap, painter)
 
 
-def bars(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
-    """Three spectrum bars: the «Спектр» mode."""
+def bars(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""Three spectrum bars: the «Спектр» mode.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(Qt.PenStyle.NoPen)
@@ -185,8 +201,9 @@ def bars(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
     return _finish(pixmap, painter)
 
 
-def wave(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
-    """A sine stroke: the «Волна» mode."""
+def wave(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""A sine stroke: the «Волна» mode.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(_pen(colour, STROKE * 1.1))
@@ -204,8 +221,9 @@ def wave(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
     return _finish(pixmap, painter)
 
 
-def ring(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
-    """A ring with a dot: the «Круг» mode."""
+def ring(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""A ring with a dot: the «Круг» mode.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(_pen(colour, STROKE * 1.1))
@@ -217,17 +235,35 @@ def ring(size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
     return _finish(pixmap, painter)
 
 
-VISUALIZER_ICONS = {"spectrum": bars, "wave": wave, "circular": ring}
+def levels(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""Two meter bars with caps: the «Уровни» mode.""" ""
+    colour = _tone("TEXT_DIM", colour)
+    pixmap, painter = _canvas(size)
+    box = size
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(colour))
+    for index, (top, length) in enumerate(((0.30, 0.40), (0.46, 0.54))):
+        x = box * (0.28 if index == 0 else 0.52)
+        painter.drawRoundedRect(QRectF(x, box * top, box * 0.20, box * length), box * 0.04, box * 0.04)
+    painter.setPen(_pen(colour, STROKE))
+    painter.drawLine(QPointF(box * 0.28, box * 0.24), QPointF(box * 0.48, box * 0.24))
+    painter.drawLine(QPointF(box * 0.52, box * 0.40), QPointF(box * 0.72, box * 0.40))
+    return _finish(pixmap, painter)
 
 
-def visualizer_icon(mode: str, size: int = ICON_SIZE, colour: str = TEXT_DIM) -> QIcon:
-    """The icon of a visualiser mode, falling back to the bars."""
+VISUALIZER_ICONS = {"spectrum": bars, "wave": wave, "circular": ring, "meters": levels}
+
+
+def visualizer_icon(mode: str, size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""The icon of a visualiser mode, falling back to the bars.""" ""
+    colour = _tone("TEXT_DIM", colour)
     factory = VISUALIZER_ICONS.get(mode, bars)
     return factory(size, colour)
 
 
-def play(size: int = ICON_SIZE, colour: str = ACCENT) -> QIcon:
-    """A filled triangle."""
+def play(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""A filled triangle.""" ""
+    colour = _tone("ACCENT", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(Qt.PenStyle.NoPen)
@@ -244,8 +280,9 @@ def play(size: int = ICON_SIZE, colour: str = ACCENT) -> QIcon:
     return _finish(pixmap, painter)
 
 
-def pause(size: int = ICON_SIZE, colour: str = ACCENT) -> QIcon:
-    """Two rounded bars."""
+def pause(size: int = ICON_SIZE, colour: str | None = None) -> QIcon:
+    """""Two rounded bars.""" ""
+    colour = _tone("ACCENT", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(Qt.PenStyle.NoPen)
@@ -259,8 +296,9 @@ def pause(size: int = ICON_SIZE, colour: str = ACCENT) -> QIcon:
     return _finish(pixmap, painter)
 
 
-def skip(size: int = ICON_SIZE, colour: str = TEXT_DIM, backwards: bool = False) -> QIcon:
-    """A double triangle with a bar: previous / next."""
+def skip(size: int = ICON_SIZE, colour: str | None = None, backwards: bool = False) -> QIcon:
+    """""A double triangle with a bar: previous / next.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     painter.setPen(Qt.PenStyle.NoPen)
@@ -285,8 +323,9 @@ def skip(size: int = ICON_SIZE, colour: str = TEXT_DIM, backwards: bool = False)
     return _finish(pixmap, painter)
 
 
-def heart(size: int = ICON_SIZE, colour: str = TEXT_DIM, filled: bool = True) -> QIcon:
-    """A heart for the like button, filled or outlined."""
+def heart(size: int = ICON_SIZE, colour: str | None = None, filled: bool = True) -> QIcon:
+    """""A heart for the like button, filled or outlined.""" ""
+    colour = _tone("TEXT_DIM", colour)
     pixmap, painter = _canvas(size)
     box = size
     path = QPainterPath()
@@ -313,7 +352,7 @@ def heart(size: int = ICON_SIZE, colour: str = TEXT_DIM, filled: bool = True) ->
 # -- inline helpers ----------------------------------------------------------
 
 
-def draw_equalizer(painter: QPainter, rect: QRectF, colour: str = ACCENT) -> None:
+def draw_equalizer(painter: QPainter, rect: QRectF, colour: str | None = None) -> None:
     """Four bars of a mini equaliser inside ``rect``, used by the row delegate.
 
     A playing row shows this instead of its number, so the eye finds the current
@@ -357,7 +396,7 @@ def placeholder_pixmap(size: int, radius: int, top: str, bottom: str) -> QPixmap
     gradient.setColorAt(0.0, QColor(top))
     gradient.setColorAt(1.0, QColor(bottom))
     painter.fillRect(QRectF(0, 0, size, size), gradient)
-    painter.setPen(QPen(QColor(TEXT), 1))
+    painter.setPen(QPen(QColor(_tone("TEXT", None)), 1))
     font = QFont(painter.font())
     font.setPixelSize(max(9, round(size * 0.4)))
     painter.setFont(font)
@@ -378,6 +417,7 @@ __all__ = [
     "draw_equalizer",
     "heart",
     "icon_size_for",
+    "levels",
     "magnifier",
     "pause",
     "placeholder_pixmap",

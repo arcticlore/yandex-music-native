@@ -26,19 +26,25 @@ from PySide6.QtCore import QCoreApplication, QEventLoop  # noqa: E402
 
 from core.audio_engine import (  # noqa: E402
     BAND_CHOICES,
+    DB_SPAN,
     DEFAULT_BANDS,
     FFT_SIZE,
     FRAME_INTERVAL_MS,
     MAX_FREQ,
     MIN_FREQ,
+    TILT_GAIN_DB,
+    TILT_TOP_HZ,
     AudioEngine,
     Envelope,
     band_edges,
+    band_tilt_db,
+    db_levels,
     detect_audio_output,
     ensure_libmpv,
     normalize_bands,
     oscilloscope,
     spectrum_bands,
+    tilt_db,
     uri_to_path,
 )
 
@@ -199,6 +205,65 @@ def test_fft() -> None:
     check("envelope resizes", resized.value.size == 2, str(resized.value.size))
     resized.reset()
     check("envelope reset", float(resized.value.max()) == 0.0)
+
+
+def test_tilt_curve_lifts_the_treble() -> None:
+    check("tilt gain in the requested band", 8.0 <= TILT_GAIN_DB <= 12.0, str(TILT_GAIN_DB))
+    check("tilt starts at 100hz", abs(float(tilt_db(100.0))) < 1e-9, str(float(tilt_db(100.0))))
+    check("tilt ends at 16khz", abs(float(tilt_db(TILT_TOP_HZ)) - TILT_GAIN_DB) < 1e-6)
+    below = tilt_db(np.array([20.0, 50.0, 100.0]))
+    check("tilt flat below 100hz", float(np.abs(below).max()) < 1e-9)
+    ramp = tilt_db(np.array([100.0, 1000.0, 4000.0, 16000.0]))
+    check("tilt rises with frequency", bool(np.all(np.diff(ramp) > 0)), str(ramp))
+    check("tilt reaches full gain", abs(float(ramp[-1]) - TILT_GAIN_DB) < 1e-6, str(ramp[-1]))
+    bands = band_tilt_db(band_edges(64))
+    check("band tilt is per band", bands.size == 64, str(bands.size))
+    check("band tilt non-decreasing", bool(np.all(np.diff(bands) >= -1e-9)))
+    check("band tilt treble lifted", float(bands[-1]) > 8.0, str(float(bands[-1])))
+
+
+def test_db_levels_are_bounded_ordered_and_auto_ranged() -> None:
+    edges = band_edges(64)
+    tilt = band_tilt_db(edges)
+    # 30 dB across the frame stays inside the span, so every band is above the
+    # gate and a dB mapping has to come out strictly decreasing.
+    ramp = 20.0 * np.log10(np.linspace(1.0, 0.0316, 64).astype(np.float32))
+    plain = db_levels(ramp)
+    check("levels in range", 0.0 <= float(plain.min()) and float(plain.max()) <= 1.0)
+    check("levels strictly ordered", bool(np.all(np.diff(plain.astype(np.float64)) < 0)))
+    levels = db_levels(ramp, tilt)
+    # A quieter copy of the same spectrum must read the same: the reference is
+    # relative, so turning the volume down cannot dim the picture.
+    quiet = db_levels(ramp - 40.0, tilt)
+    check("levels volume independent", float(np.abs(levels - quiet).max()) < 1e-6)
+    floor = -200.0 * np.ones(64, dtype=np.float32)
+    check("levels gate silence", float(db_levels(floor, tilt).max()) == 0.0)
+    check("levels of nothing", db_levels(np.zeros(0, dtype=np.float32), tilt).size == 0)
+    # One loud band against a noise floor: the loud one pins the reference, the
+    # noise has no vote on it and fades out instead of sharing its brightness.
+    banded = np.full(64, -95.0, dtype=np.float32)
+    banded[40] = 0.0
+    peak = db_levels(banded, 0.0)
+    check("levels peak near full scale", 0.9 < float(peak.max()) <= 1.0, str(float(peak.max())))
+    check("levels quiet bands fade", float(peak[0]) < 0.1, str(float(peak[0])))
+    check("span is a real range", DB_SPAN > 20.0, str(DB_SPAN))
+
+
+def test_spectrum_keeps_every_band_alive() -> None:
+    rng = np.random.default_rng(11)
+    white = rng.standard_normal(FFT_SIZE)
+    freqs = np.fft.rfftfreq(FFT_SIZE, 1.0 / SR)
+    spec = np.fft.rfft(white) / np.maximum(1.0, (np.maximum(freqs, 1.0) / 100.0) ** (3.0 / 6.0))
+    pink = np.fft.irfft(spec, FFT_SIZE)
+    pink = (pink / (float(np.sqrt(np.mean(pink**2))) + 1e-12) * 0.1).astype(np.float32)
+    bands = spectrum_bands(pink, SR, 64)
+    check("spectrum bounded", 0.0 <= float(bands.min()) and float(bands.max()) <= 1.0)
+    check("spectrum keeps all bands alive", int((bands > 0.1).sum()) == 64, str(int((bands > 0.1).sum())))
+    low, high = bands[:16], bands[48:]
+    ratio = float(high.mean()) / max(float(low.mean()), 1e-9)
+    check("spectrum treble is not dead", ratio > 0.5, f"hi/lo={ratio:.2f}")
+    check("spectrum treble not louder than tilt asks", ratio < 3.0, f"hi/lo={ratio:.2f}")
+    check("spectrum shape is audible", float(bands.max()) > 0.5, str(float(bands.max())))
 
 
 def test_fft_signal_rate(app: QCoreApplication) -> None:
@@ -455,6 +520,9 @@ def main() -> int:
         tmp = Path(raw)
         media = make_media(tmp)
         test_helpers()
+        test_tilt_curve_lifts_the_treble()
+        test_db_levels_are_bounded_ordered_and_auto_ranged()
+        test_spectrum_keeps_every_band_alive()
         test_fft()
         test_fft_signal_rate(app)
         test_transport(app, media)

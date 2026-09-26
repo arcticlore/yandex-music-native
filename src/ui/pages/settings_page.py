@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.config_manager import VALID_QUALITIES, VALID_VISUALIZERS, ConfigManager
+from core.config_manager import VALID_QUALITIES, VALID_THEMES, VALID_VISUALIZERS, ConfigManager
 from ui.theme import PAGE_PADDING, SPACE_LG
 from ui.widgets.chips import ChipGroup
 
@@ -25,6 +25,7 @@ VISUALIZER_CHOICES = (
     ("spectrum", "Спектр"),
     ("wave", "Волна"),
     ("circular", "Круг"),
+    ("meters", "Уровни"),
 )
 QUALITY_CHOICES = (
     ("auto", "Авто"),
@@ -32,7 +33,11 @@ QUALITY_CHOICES = (
     ("320", "320 кбит/с"),
     ("192", "192 кбит/с"),
 )
-THEME_CHOICES = (("dark", "Тёмная"), ("light", "Светлая"))
+THEME_CHOICES = (
+    ("obsidian", "Obsidian Dark"),
+    ("cyberpunk", "Neon Cyberpunk"),
+    ("oled", "OLED Pure Black"),
+)
 TRAY_CHOICES = (("always", "Всегда"), ("playing", "Только при игре"), ("never", "Не показывать"))
 
 
@@ -70,7 +75,7 @@ class SettingsPage(QWidget):
 
         self.visualizer_group = ChipGroup("Визуализатор", _filtered(VALID_VISUALIZERS, VISUALIZER_CHOICES))
         self.quality_group = ChipGroup("Качество", _filtered(VALID_QUALITIES, QUALITY_CHOICES))
-        self.theme_group = ChipGroup("Тема", THEME_CHOICES)
+        self.theme_group = ChipGroup("Тема", _filtered(VALID_THEMES, THEME_CHOICES))
         self.tray_group = ChipGroup("Значок в трее", TRAY_CHOICES)
         for group in (
             self.visualizer_group,
@@ -143,7 +148,8 @@ class SettingsPage(QWidget):
 
     def _on_theme(self, value: str) -> None:
         self._config.set_theme(value)
-        self.status_label.setText(f"Тема: {value}")
+        label = dict(THEME_CHOICES).get(value, value)
+        self.status_label.setText(f"Тема: {label}")
         self.theme_changed.emit(value)
 
     def _on_tray(self, value: str) -> None:

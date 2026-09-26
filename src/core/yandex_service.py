@@ -110,6 +110,12 @@ STREAM_CACHE_TTL_S = 45.0
 ERROR_CACHE_TTL_S = 10.0
 MAX_HISTORY = 100
 
+SEARCH_TYPE_ALL = "all"
+"""Search every kind at once; the library defaults to tracks otherwise."""
+
+GAPLESS_PREFETCH_RATIO = 0.8
+"""Position in the current track at which the next link is already fetched."""
+
 QUALITY_AUTO = "auto"
 QUALITY_LOSSLESS = "lossless"
 QUALITY_FLAC = "flac"
@@ -277,10 +283,17 @@ class WaveTrack:
     explicit: bool = False
     liked: bool = False
     source: str = ""
+    year: int = 0
+    has_lyrics: bool = False
 
     @property
     def artists_name(self) -> str:
         return ", ".join(self.artists)
+
+    @property
+    def year_label(self) -> str:
+        """The release year as shown in the drawer, empty when unknown."""
+        return str(self.year) if self.year else ""
 
     def cover_url(self, size: str | int = DEFAULT_COVER_SIZE) -> str | None:
         return track_cover_url(self, size)
@@ -300,6 +313,9 @@ class WaveTrack:
             "explicit": self.explicit,
             "liked": self.liked,
             "source": self.source,
+            "year": self.year,
+            "year_label": self.year_label,
+            "has_lyrics": self.has_lyrics,
         }
 
     @classmethod
@@ -323,6 +339,10 @@ class WaveTrack:
         available = getattr(track, "available", None)
         duration = getattr(track, "duration_ms", None)
         explicit = getattr(track, "explicit", None)
+        # The year lives on the album, and the release date on the track; either
+        # is good enough for a drawer that says «2021» and nothing more.
+        year = getattr(album, "year", None) or getattr(track, "year", None) or 0
+        lyrics = getattr(track, "lyrics", None) or getattr(track, "texts", None) or ()
         return cls(
             id=str(raw_id),
             track_id=track_id,
@@ -336,6 +356,8 @@ class WaveTrack:
             explicit=bool(explicit),
             liked=bool(liked),
             source=source,
+            year=int(year or 0),
+            has_lyrics=bool(lyrics),
         )
 
     @classmethod
@@ -447,6 +469,14 @@ class SearchResults:
     albums: tuple[CatalogItem, ...] = ()
     artists: tuple[CatalogItem, ...] = ()
     playlists: tuple[CatalogItem, ...] = ()
+    generation: int = 0
+    """``search()`` call this answer belongs to, so a slow reply can be dropped.
+
+    The worker runs one job at a time, so answers arrive in request order - but
+    a stale answer is still wrong the moment a newer query has been *asked for*
+    (or typed) and its own answer has not landed yet.  The page compares this
+    number with the one it last requested and ignores anything older.
+    """
 
     @property
     def total(self) -> int:
@@ -463,6 +493,7 @@ class SearchResults:
             "albums": [item.to_dict() for item in self.albums],
             "artists": [item.to_dict() for item in self.artists],
             "playlists": [item.to_dict() for item in self.playlists],
+            "generation": self.generation,
         }
 
 
@@ -476,7 +507,7 @@ def _iter_section(raw: Any, name: str) -> list[Any]:
     return list(section or ())
 
 
-def search_results(query: str, raw: Any) -> SearchResults:
+def search_results(query: str, raw: Any, generation: int = 0) -> SearchResults:
     """Convert a ``Search`` response into :class:`SearchResults`."""
     tracks = tuple(
         item
@@ -504,6 +535,7 @@ def search_results(query: str, raw: Any) -> SearchResults:
         albums=albums,
         artists=artists,
         playlists=playlists,
+        generation=int(generation),
     )
 
 
@@ -527,6 +559,58 @@ def liked_items(section: str, raw: Any) -> tuple[WaveTrack, ...] | tuple[Catalog
     return tuple(
         item for item in (builder(entry) for entry in _iter_section(raw, _text(section))) if item is not None
     )
+
+
+LIKED_TRACK_LIMIT = 100
+"""How many liked tracks are hydrated with their full metadata in one request."""
+
+
+def _entry_track_id(entry: Any) -> str:
+    """The id of a liked-track entry, whether it is wrapped or bare."""
+    if entry is None:
+        return ""
+    nested = getattr(entry, "track", None)
+    if nested is not None:
+        return _text(getattr(nested, "id", None)) or _text(getattr(nested, "track_id", None))
+    return _text(getattr(entry, "id", None)) or _text(getattr(entry, "track_id", None))
+
+
+def hydrate_liked_tracks(client: Any, raw: Any, limit: int = LIKED_TRACK_LIMIT) -> dict[str, Any]:
+    """Return a ``users_likes_tracks``-shaped payload with metadata filled in.
+
+    ``users_likes_tracks`` answers with references: an id and a liked flag, with
+    a title only if the library happens to have the object cached.  The list is
+    rendered as-is, so the user would see «Без названия» and no album, no cover
+    and a zero duration for every row.  One ``tracks`` call for the first
+    ``limit`` ids fills that in.
+
+    The payload is a mapping with a ``tracks`` key - the shape
+    :func:`_iter_section` and :func:`liked_items` already read - so the hydrated
+    result can be rendered by the same code as the raw response.  The order of
+    the liked list is preserved, an id the API does not know keeps its own
+    reference, and a failing or partial request degrades to the references
+    instead of raising: a short list beats an empty tab.
+    """
+    entries = _iter_section(raw, "tracks")
+    payload: dict[str, Any] = {"tracks": entries}
+    wanted = [_entry_track_id(entry) for entry in entries][: max(0, int(limit))]
+    ids = [track_id for track_id in wanted if track_id]
+    if not ids:
+        return payload
+    try:
+        response = client.tracks(ids)
+        section = getattr(response, "tracks", None)
+        full = list(response if section is None else section or ())
+    except Exception as exc:  # the references are still worth rendering
+        log.warning("could not hydrate liked tracks: %s", exc)
+        return payload
+    by_id = {_entry_track_id(track): track for track in full if _entry_track_id(track)}
+    if not by_id:
+        return payload
+    hydrated: list[Any] = [by_id.get(track_id) or entry for entry, track_id in zip(entries, wanted)]
+    hydrated.extend(entries[len(wanted) :])
+    payload["tracks"] = hydrated
+    return payload
 
 
 @dataclass(frozen=True)
@@ -965,6 +1049,8 @@ class YandexService(QObject):
     collection_failed = Signal(str)
     stream_ready = Signal(object)
     stream_error = Signal(str, str)
+    lyrics_ready = Signal(str, str)
+    lyrics_error = Signal(str, str)
     busy_changed = Signal(bool)
 
     def __init__(
@@ -1000,6 +1086,7 @@ class YandexService(QObject):
         self._stream_errors: dict[tuple[str, str, bool], float] = {}
         self._likes: set[str] = set()
         self._dislikes: set[str] = set()
+        self._search_generation = 0
         self._token = token
 
     # -- lifecycle ---------------------------------------------------------
@@ -1367,8 +1454,15 @@ class YandexService(QObject):
 
     # -- search and collection ----------------------------------------------
 
-    def search(self, query: str, page: int = 0) -> bool:
-        """Search tracks, albums, artists and playlists; results arrive async."""
+    def search(self, query: str, page: int = 0, type_: str = SEARCH_TYPE_ALL) -> bool:
+        """Search tracks, albums, artists and playlists; results arrive async.
+
+        ``type_`` is passed to the API as-is (``"all"`` by default) because the
+        library treats anything it does not recognise as a single-kind search.
+        The return value says whether the job was queued; the generation of the
+        request is available as :attr:`last_search_generation` for callers that
+        need to tell a fresh answer from a stale one.
+        """
         text = _text(query)
         if not text:
             self.search_failed.emit("Введите поисковый запрос")
@@ -1378,17 +1472,37 @@ class YandexService(QObject):
             return False
         self.start()
         number = max(0, int(page))
+        with self._lock:
+            self._search_generation += 1
+            generation = self._search_generation
+        kind = _text(type_) or SEARCH_TYPE_ALL
 
         def call(client: Any) -> Any:
-            return client.search(text, page=number)
+            return client.search(text, page=number, type_=kind)
 
         def ok(result: Any) -> None:
-            self.search_ready.emit(search_results(text, result))
+            if not self._search_is_current(generation):
+                log.debug("dropping stale search results for %r (generation %d)", text, generation)
+                return
+            self.search_ready.emit(search_results(text, result, generation))
 
         def err(exc: Exception) -> None:
+            if not self._search_is_current(generation):
+                return
             self.search_failed.emit(readable_error(exc))
 
         return self._submit(_Job("search", call, ok, err))
+
+    def _search_is_current(self, generation: int) -> bool:
+        """Whether ``generation`` is still the newest search that was asked for."""
+        with self._lock:
+            return int(generation) >= self._search_generation
+
+    @property
+    def last_search_generation(self) -> int:
+        """Generation of the newest search that was asked for."""
+        with self._lock:
+            return self._search_generation
 
     def load_liked(self, section: str = "tracks") -> bool:
         """Load a liked section of the current account."""
@@ -1408,7 +1522,12 @@ class YandexService(QObject):
         method = f"users_likes_{key}"
 
         def call(client: Any) -> Any:
-            return getattr(client, method)(uid)
+            result = getattr(client, method)(uid)
+            if key == "tracks":
+                # The like list only carries references; one extra call gives
+                # the rows a title, an album, a cover and a duration.
+                return hydrate_liked_tracks(client, result)
+            return result
 
         def ok(result: Any) -> None:
             self.collection_ready.emit(key, liked_items(key, result))
@@ -1788,6 +1907,37 @@ class YandexService(QObject):
 
         return self._submit(_Job("stream_url", call, ok, err))
 
+    def lyrics(self, track: Any = None) -> bool:
+        """Fetch the plain lyrics of ``track`` in the background.
+
+        The text is deliberately not cached: it is a few kilobytes, it never
+        changes, and the caller only ever asks when the drawer is open.
+        """
+        target = self._resolve_track(track)
+        if target is None:
+            self.lyrics_error.emit("", "Трек не выбран")
+            return False
+        if not self._token:
+            self.lyrics_error.emit(target.track_id, "Нет авторизации: войдите в аккаунт")
+            return False
+        track_id = target.track_id
+        self.start()
+
+        def call(client: Any) -> Any:
+            fetched = client.tracks(track_id)
+            first = fetched[0] if fetched else None
+            if first is None:
+                return ""
+            return first.lyrics or ""
+
+        def ok(raw: Any) -> None:
+            self.lyrics_ready.emit(track_id, _text(raw))
+
+        def err(exc: Exception) -> None:
+            self.lyrics_error.emit(track_id, readable_error(exc))
+
+        return self._submit(_Job("lyrics", call, ok, err))
+
     def _remember_error(self, key: tuple[str, str, bool], track_id: str, message: str) -> None:
         with self._lock:
             self._stream_errors[key] = time.monotonic()
@@ -1900,15 +2050,18 @@ __all__ = [
     "FEEDBACK_SKIP",
     "FEEDBACK_TRACK_PLAYED",
     "FEEDBACK_TRACK_STARTED",
+    "GAPLESS_PREFETCH_RATIO",
     "LANGUAGE_LABELS",
     "LANGUAGE_VALUES",
     "LIKED_SECTIONS",
+    "LIKED_TRACK_LIMIT",
     "MOOD_ENERGY_LABELS",
     "MOOD_ENERGY_VALUES",
     "PREFETCH_THRESHOLD",
     "QUALITY_AUTO",
     "QUALITY_FLAC",
     "QUALITY_LOSSLESS",
+    "SEARCH_TYPE_ALL",
     "SearchResults",
     "StreamLink",
     "WAVE_STATION",
@@ -1917,6 +2070,7 @@ __all__ = [
     "YandexService",
     "cover_size",
     "default_client_factory",
+    "hydrate_liked_tracks",
     "liked_items",
     "normalize_diversity",
     "normalize_language",

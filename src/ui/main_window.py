@@ -9,6 +9,7 @@ testable without Qt windows.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtGui import (
@@ -60,6 +61,7 @@ from ui.theme import (
     VOLUME_SLIDER_WIDTH,
 )
 from ui.widgets.cover_frame import CoverFrame
+from ui.widgets.cover_loader import CoverLoader, circular_pixmap
 from ui.widgets.icons import pause as pause_icon
 from ui.widgets.icons import play as play_icon
 from ui.widgets.icons import (
@@ -76,6 +78,7 @@ from ui.widgets.icons import (
 )
 from ui.widgets.icons import visualizer_icon
 from ui.widgets.like_button import LikeButton
+from ui.widgets.now_playing_drawer import NowPlayingDrawer
 from ui.widgets.track_list import format_duration
 
 log = logging.getLogger(__name__)
@@ -91,6 +94,7 @@ VISUALIZER_LABELS = {
     "spectrum": "Спектр",
     "wave": "Волна",
     "circular": "Круг",
+    "meters": "Уровни",
 }
 REPEAT_LABELS = {"off": "выключен", "all": "всё", "one": "трек"}
 SEEK_STEP_MS = 5000
@@ -98,7 +102,16 @@ THREAD_JOIN_MS = 1500
 VOLUME_STEP = 5
 LOSSLESS_BADGE = "FLAC"
 LOSSY_BADGE = "HQ"
-MIN_WINDOW = (1120, 680)
+QUALITY_AUTO = "auto"
+MIN_WINDOW = (900, 600)
+"""The smallest window that still fits the shell.
+
+The bar is three fixed sections - 260px of metadata, a 280px transport and 240px
+of volume - so below 900px the transport starts losing buttons and the sidebar
+starts winning the argument.  600px is where the page keeps a list taller than a
+handful of rows.  Anything smaller is a window the user cannot use, and Qt
+enforces it for them.
+"""
 SIDE_PANEL_WIDTH = PLAYER_RIGHT_WIDTH
 """The fixed width of the right-hand section, kept as a public alias."""
 
@@ -208,10 +221,17 @@ class MainWindow(QMainWindow):
         self._artist_text = ""
         self._profile_text = "Не авторизован"
         self._profile_hint_text = ""
+        self._avatar_url = ""
+        self._quality_pending = False
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(*MIN_WINDOW)
         self.resize(1180, 720)
+        self._covers = CoverLoader(self)
+        self._covers.loaded.connect(self._on_avatar_loaded)
         self._build_ui()
+        # The stored quality has to reach the controller before the first track
+        # is resolved, otherwise the setting only takes effect after a restart.
+        self._controller.set_quality(self._config.get_quality())
         self._connect_controller()
         self._install_shortcuts()
         self._refresh_all()
@@ -257,6 +277,20 @@ class MainWindow(QMainWindow):
         label.setToolTip(text)
         label.setText(self._elided(label, text))
 
+    def _make_drawer_target(self, widget: QWidget, tooltip: str) -> None:
+        """Turn ``widget`` into a click target that toggles the drawer.
+
+        A label and a cover frame are not buttons, so they get a pointing cursor
+        and a tooltip to say they are live; the click itself stays on the widget
+        because a mouse-transparent parent would swallow the whole bar.
+        """
+        widget.setCursor(Qt.CursorShape.PointingHandCursor)
+        widget.setToolTip(tooltip)
+        widget.mousePressEvent = self._on_drawer_click  # type: ignore[method-assign]
+
+    def _on_drawer_click(self, _event: Any) -> None:
+        self.drawer.toggle()
+
     def _build_ui(self) -> None:
         root = QWidget()
         self.nav_buttons: dict[str, QPushButton] = {}
@@ -278,7 +312,14 @@ class MainWindow(QMainWindow):
         }
         for key, _label in PAGES:
             self.stack.addWidget(self.pages[key])
-        middle_layout.addWidget(self.stack, 1)
+        content = QWidget()
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self.stack, 1)
+        self.drawer = NowPlayingDrawer(self._controller, content)
+        content_layout.addWidget(self.drawer, 0)
+        middle_layout.addWidget(content, 1)
         middle_layout.addWidget(self._build_player_bar())
         root_layout.addWidget(middle, 1)
         self.setCentralWidget(root)
@@ -414,6 +455,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE_MD)
         self.cover_label = CoverFrame(PLAYER_COVER_SIZE)
+        self._make_drawer_target(self.cover_label, "Открыть панель трека")
         layout.addWidget(self.cover_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         titles = QVBoxLayout()
@@ -425,6 +467,7 @@ class MainWindow(QMainWindow):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(SPACE_XS)
         self.title_label = self._eliding_label("TrackTitle", "Ничего не играет")
+        self._make_drawer_target(self.title_label, "Открыть панель трека")
         title_row.addWidget(self.title_label, 1)
         self.like_button = LikeButton()
         self.like_button.clicked.connect(self._on_like)
@@ -579,7 +622,7 @@ class MainWindow(QMainWindow):
 
     def _connect_controller(self) -> None:
         controller = self._controller
-        controller.track_changed.connect(self._refresh_track)
+        controller.track_changed.connect(self._on_track_changed)
         controller.state_changed.connect(lambda _state: self._refresh_state())
         controller.position_changed.connect(self._on_position)
         controller.like_status_changed.connect(lambda *_: self._refresh_like())
@@ -590,8 +633,14 @@ class MainWindow(QMainWindow):
         controller.seeked.connect(lambda _value: self._refresh_seek())
         controller.playback_error.connect(self._show_error)
         controller.wave_error.connect(self._show_error)
+        self.drawer.album_requested.connect(self._on_drawer_album)
+        self.drawer.lyrics_requested.connect(self._on_drawer_lyrics)
+        service = controller.service
+        service.lyrics_ready.connect(self._on_lyrics_ready)
+        service.lyrics_error.connect(self._on_lyrics_error)
         settings: SettingsPage = self.pages["settings"]  # type: ignore[assignment]
         settings.visualizer_changed.connect(self.set_visualizer_mode)
+        settings.quality_changed.connect(self.set_quality)
         # A click on the stage changes the style behind the button, so the icon
         # and the tooltip follow it in both directions.
         self.wave_page.visualizer_mode_changed.connect(lambda _mode: self._refresh_mode_button())
@@ -601,6 +650,8 @@ class MainWindow(QMainWindow):
         for sequence, slot in (
             ("Ctrl+Q", self.close),
             ("Ctrl+F", lambda: self.show_page("search")),
+            ("Ctrl+N", self._toggle_drawer),
+            ("Escape", self._close_drawer),
             ("Ctrl+L", lambda: self.show_page("collection")),
             ("Space", self._on_play),
             ("Ctrl+Right", self._controller.next),
@@ -625,8 +676,11 @@ class MainWindow(QMainWindow):
         self._config.set("last_page", key)
         self.page_changed.emit(key)
         if key == "collection":
+            # Arriving at the tab loads what is missing, not everything: the
+            # page also loads itself on its first show, and a reload is the
+            # «Обновить» button's job.
             page: CollectionPage = self.pages["collection"]  # type: ignore[assignment]
-            page.refresh()
+            page.ensure_loaded()
         return key
 
     @property
@@ -641,8 +695,14 @@ class MainWindow(QMainWindow):
     def wave_page(self) -> WavePage:
         return self.pages["wave"]  # type: ignore[return-value]
 
-    def set_profile(self, login: str, detail: str = "") -> None:
-        """Show the account card: name, hint and the gold «Плюс» badge."""
+    def set_profile(self, login: str, detail: str = "", avatar_url: str = "") -> None:
+        """Show the account card: name, hint, avatar and the gold «Плюс» badge.
+
+        ``avatar_url`` is fetched off the GUI thread through the shared
+        :class:`~ui.widgets.cover_loader.CoverLoader`, so a slow avatar host
+        cannot freeze the window; the label keeps its styled placeholder until
+        the image lands.
+        """
         text = login or "Не авторизован"
         self._set_elided(self.profile_label, "_profile_text", text)
         signed_in = bool(login)
@@ -650,6 +710,31 @@ class MainWindow(QMainWindow):
         self._set_elided(self.profile_hint, "_profile_hint_text", hint)
         self.plus_badge.setVisible(bool(detail) and signed_in)
         self.logout_button.setEnabled(signed_in)
+        self.set_avatar(avatar_url if signed_in else "")
+
+    def set_avatar(self, url: str) -> None:
+        """Show the account avatar at :data:`~ui.theme.COVER_SIZE` square."""
+        self._avatar_url = url
+        self.avatar_label.clear()
+        if not url:
+            return
+        cached = self._covers.cached(url)
+        if cached is not None:
+            self._show_avatar(url, cached)
+            return
+        self._covers.request(url)
+
+    def _show_avatar(self, url: str, pixmap) -> None:
+        """Paint ``pixmap`` if it is still the avatar that was asked for."""
+        if url != self._avatar_url:
+            return
+        masked = circular_pixmap(pixmap, COVER_SIZE)
+        if masked is not None:
+            self.avatar_label.setPixmap(masked)
+            self.avatar_label.setToolTip("")
+
+    def _on_avatar_loaded(self, url: str, pixmap) -> None:
+        self._show_avatar(url, pixmap)
 
     # -- player bar ---------------------------------------------------------
 
@@ -764,7 +849,14 @@ class MainWindow(QMainWindow):
                 accent.style().polish(accent)
 
     def _refresh_quality(self) -> None:
-        """The badge next to the title: FLAC for lossless, HQ otherwise."""
+        """The badge next to the title: FLAC for lossless, HQ otherwise.
+
+        While a switch is waiting for the next track the badge keeps reporting
+        what is *playing* and is marked ``pending``: the stream of the current
+        track was already resolved, so claiming the new quality here would be a
+        lie the user hears thirty seconds later as a 128 kbps file labelled
+        ``FLAC``.
+        """
         track = self._controller.current
         text = quality_badge(track)
         self.quality_badge.setText(text)
@@ -772,8 +864,21 @@ class MainWindow(QMainWindow):
         self.quality_badge.setToolTip(quality_detail(track))
         lossless = bool(track is not None and getattr(track, "lossless", False))
         self.quality_badge.setProperty("lossless", "true" if lossless else "false")
+        self.quality_badge.setProperty("pending", "true" if self._quality_pending else "false")
         self.quality_badge.style().unpolish(self.quality_badge)
         self.quality_badge.style().polish(self.quality_badge)
+
+    def set_quality(self, quality: str) -> str:
+        """Use ``quality`` for the next resolved track and mark the badge.
+
+        The current stream is not touched - it is already downloading - so the
+        badge goes to its pending state and clears itself when the next track
+        starts, which is the moment the setting is actually in force.
+        """
+        applied = self._controller.set_quality(str(quality or QUALITY_AUTO))
+        self._quality_pending = True
+        self._refresh_quality()
+        return applied
 
     def _refresh_all(self) -> None:
         self._refresh_track()
@@ -782,6 +887,12 @@ class MainWindow(QMainWindow):
         self._refresh_seek()
         self._refresh_queue_buttons()
         self.set_visualizer_mode(self._config.get_visualizer())
+
+    def _on_track_changed(self, track: object) -> None:
+        """A new track is the moment a pending quality switch takes effect."""
+        self._quality_pending = False
+        self._refresh_track()
+        self._refresh_quality()
 
     def _refresh_track(self) -> None:
         track = self._controller.current
@@ -846,6 +957,30 @@ class MainWindow(QMainWindow):
         """A wheel notch over the right panel moves the volume by one step."""
         self._controller.set_volume(self._controller.volume + step)
 
+    # -- now-playing drawer -------------------------------------------------
+
+    def _toggle_drawer(self) -> None:
+        self.drawer.toggle()
+
+    def _close_drawer(self) -> None:
+        self.drawer.close_panel()
+
+    def _on_drawer_album(self, album: str, artist: str) -> None:
+        """«К альбому» searches for the album, which is the only album view here."""
+        query = f"{artist} {album}".strip() if artist else album
+        page: SearchPage = self.pages["search"]  # type: ignore[assignment]
+        self.show_page("search")
+        page.search(query)
+
+    def _on_drawer_lyrics(self, track_id: str) -> None:
+        self._controller.service.lyrics(track_id)
+
+    def _on_lyrics_ready(self, track_id: str, text: str) -> None:
+        self.drawer.lyrics_loaded.emit(track_id, text)
+
+    def _on_lyrics_error(self, _track_id: str, message: str) -> None:
+        self._show_error(message)
+
     def _show_error(self, message: str) -> None:
         if message:
             self.statusBar().showMessage(message, 6000)
@@ -863,6 +998,7 @@ class MainWindow(QMainWindow):
         if self._closed:
             return
         self._closed = True
+        self._covers.stop()
         self.wave_page.visualizer.stop_all()
         self._controller.stop()
         self._controller.shutdown()
@@ -894,6 +1030,7 @@ __all__ = [
     "APP_NAME",
     "MIN_WINDOW",
     "PAGES",
+    "QUALITY_AUTO",
     "SIDE_PANEL_WIDTH",
     "SEEK_STEP_MS",
     "THREAD_JOIN_MS",
@@ -901,4 +1038,5 @@ __all__ = [
     "VOLUME_STEP",
     "MainWindow",
     "quality_badge",
+    "quality_detail",
 ]

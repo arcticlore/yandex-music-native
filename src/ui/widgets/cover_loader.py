@@ -18,8 +18,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QObject, QRect, QRunnable, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
 
 from core.playback_controller import (
     cover_cache_dir,
@@ -68,6 +68,46 @@ def _decode(path: str) -> QPixmap | None:
     except Exception:  # pragma: no cover - unreadable file
         return None
     return None if pixmap.isNull() else pixmap
+
+
+def circular_pixmap(pixmap: QPixmap | None, size: int) -> QPixmap | None:
+    """``pixmap`` cropped to a ``size`` square and masked into a circle.
+
+    A QLabel paints a pixmap as a rectangle, so an account avatar would show as
+    a hard-edged square in the middle of a rounded card.  The crop is a centred
+    square taken with a painter rather than ``QPixmap.scaled``: scaling asks Qt
+    to work out the device pixel ratio of the result, and the caller asked for a
+    pixel size.  Drawing at the device size and setting the ratio afterwards
+    keeps the result exactly ``size`` logical pixels wide and still sharp on a
+    HiDPI screen, where the mask is an antialiased ellipse in the same device
+    pixels rather than a staircase.
+    """
+    if pixmap is None or pixmap.isNull() or size <= 0:
+        return None
+    ratio = pixmap.devicePixelRatio()
+    if not ratio or ratio <= 0:
+        ratio = 1.0
+    side = max(1, int(round(size * ratio)))
+    out = QPixmap(side, side)
+    out.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(out)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    width, height = pixmap.width(), pixmap.height()
+    edge = max(1, min(width, height))
+    source = QRect((width - edge) // 2, (height - edge) // 2, edge, edge)
+    painter.drawPixmap(QRect(0, 0, side, side), pixmap, source)
+    painter.end()
+    out.setDevicePixelRatio(ratio)
+    mask = QPixmap(side, side)
+    mask.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(mask)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(Qt.GlobalColor.white))
+    painter.drawEllipse(0, 0, side - 1, side - 1)
+    painter.end()
+    out.setMask(mask.mask())
+    return out
 
 
 class _Signals(QObject):
@@ -165,4 +205,4 @@ class CoverLoader(QObject):
         self._queued.clear()
 
 
-__all__ = ["CoverLoader", "MAX_CONCURRENT", "PENDING_LIMIT", "cached_pixmap"]
+__all__ = ["CoverLoader", "MAX_CONCURRENT", "PENDING_LIMIT", "cached_pixmap", "circular_pixmap"]

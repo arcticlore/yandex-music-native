@@ -26,6 +26,17 @@ CONFIG_FILENAME = "config.json"
 KEYRING_SERVICE = APP_ID
 KEYRING_USERNAME = "oauth-token"
 
+VALID_THEMES = ("obsidian", "cyberpunk", "oled")
+"""The theme names the UI can render; anything else falls back to the default.
+
+Spelled out here rather than imported from :mod:`ui.theme` because the config
+layer must not depend on the view layer - but the names have to agree, and
+``tests/test_ui_shell.py`` asserts that they do.
+"""
+
+DEFAULT_THEME = "obsidian"
+"""Obsidian Dark, the theme an unconfigured install opens with."""
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "volume": 80,
     "visualizer": "spectrum",
@@ -34,12 +45,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "cache_tracks": True,
     "cache_limit_mb": 2048,
     "notifications": True,
-    "theme": "dark",
+    "theme": DEFAULT_THEME,
     "shuffle": False,
     "repeat": "off",
 }
 
-VALID_VISUALIZERS = ("spectrum", "wave", "circular")
+VALID_VISUALIZERS = ("spectrum", "wave", "circular", "meters")
 VALID_QUALITIES = ("auto", "lossless", "320", "192")
 REPEAT_MODES = ("off", "all", "one")
 
@@ -229,10 +240,18 @@ class ConfigManager:
         self.set_bool("notifications", value)
 
     def get_theme(self) -> str:
-        return str(self.get("theme", "dark"))
+        """The stored theme, or the default if the file names one we do not have.
+
+        A hand-edited or downgraded config must not be able to leave the app
+        unpainted, so an unknown name resolves to the default rather than being
+        handed to the renderer.
+        """
+        value = str(self.get("theme", DEFAULT_THEME) or DEFAULT_THEME)
+        return value if value in VALID_THEMES else DEFAULT_THEME
 
     def set_theme(self, value: str) -> None:
-        self.set("theme", str(value) or "dark")
+        name = str(value or "").strip().lower()
+        self.set("theme", name if name in VALID_THEMES else DEFAULT_THEME)
 
     # -- keyring ------------------------------------------------------------
 

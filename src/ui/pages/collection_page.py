@@ -2,7 +2,13 @@
 
 Every section is fetched through :meth:`core.yandex_service.YandexService.load_liked`,
 which runs the request on the service worker thread; the page only renders the
-``collection_ready`` payload, so scrolling never blocks the GUI.
+``collection_ready`` payload, so scrolling never blocks the GUI.  The liked
+tracks arrive as references, so the service hydrates them with one extra call
+before they reach the list.
+
+The tab loads itself the first time it is shown: a «Коллекция» the user has to
+refresh by hand looks broken, and there is nothing to see before the request
+anyway.  Later switches are free, the data is already there.
 
 The page draws one frame around the whole result area - see
 :class:`ui.widgets.results_panel.ResultsPanel` - so the tabs, the list and the
@@ -45,15 +51,50 @@ class CollectionPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self._controller = controller
+        self._loaded: set[str] = set()
+        # Sections asked for but not yet answered. The failure signal carries no
+        # section, so this is what lets a refused request be retried without
+        # guessing which tab it belonged to.
+        self._pending: set[str] = set()
+        """Sections that already hold an answer, so the first show fetches once."""
         self._build_ui()
         controller.service.collection_ready.connect(self._on_ready)
         controller.service.collection_failed.connect(self._on_failed)
         for section in SECTION_ORDER:
             page = self._pages[section]
             if isinstance(page, TrackList):
-                page.set_placeholder("Нажмите «Обновить»")
+                page.set_placeholder("Открываем вашу коллекцию…")
             else:
                 page.setEnabled(False)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Load the visible section the first time the tab is shown."""
+        super().showEvent(event)
+        self._load_once(self.current_section())
+
+    def _on_tab_changed(self, _index: int) -> None:
+        self._load_once(self.current_section())
+
+    def ensure_loaded(self) -> bool:
+        """Load the visible section if this page has no answer for it yet.
+
+        This is what arriving at the tab should do. A reload is a deliberate act
+        and belongs to the «Обновить» button, so walking in and out of the tab
+        does not re-ask the network for a list that is already on screen.
+        """
+        return self._load_once(self.current_section())
+
+    def _load_once(self, section: str) -> bool:
+        """Fetch ``section`` unless it holds an answer or one is on the way.
+
+        The in-flight case is the one that matters: without it, leaving the tab
+        and coming back while the first request is still out asks the network a
+        second time for the same list, and whichever answer arrives last wins.
+        """
+        if section in self._loaded or section in self._pending:
+            return False
+        self._pending.add(section)
+        return self.refresh(section)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -79,6 +120,7 @@ class CollectionPage(QWidget):
                 page = self.panel.add_result_list(SECTION_TITLES[section])
             self._pages[section] = page
         root.addWidget(self.panel, 1)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("Dim")
@@ -124,12 +166,14 @@ class CollectionPage(QWidget):
         page = self._pages.get(section)
         if page is None:
             return
+        self._loaded.add(section)
+        self._pending.discard(section)
         if isinstance(page, TrackList):
-            tracks = list(items or [])
+            tracks = list(items or ())
             page.set_tracks(tracks)
             self.status_label.setText(f"{SECTION_TITLES[section]}: {len(tracks)}")
             return
-        entries = list(items or [])
+        entries = list(items or ())
         page.clear()
         for index, entry in enumerate(entries):
             page.addItem(entry_item(entry, index))
@@ -138,6 +182,12 @@ class CollectionPage(QWidget):
         self.status_label.setText(f"{SECTION_TITLES[section]}: {len(entries)}")
 
     def _on_failed(self, message: str) -> None:
+        # A refused request (no token yet, no network) must not burn the one
+        # automatic load: the next time the tab is shown it tries again. The
+        # signal names no section, so every outstanding request is released -
+        # retrying a section that did succeed is cheap, guessing wrong is not.
+        self._loaded.difference_update(self._pending)
+        self._pending.clear()
         self.status_label.setText(message)
 
 

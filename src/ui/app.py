@@ -26,6 +26,7 @@ from core.playback_controller import PlaybackController
 from core.yandex_service import YandexService
 from ui.dialogs.auth_dialog import AuthDialog
 from ui.main_window import MainWindow
+from ui.pages.settings_page import SettingsPage
 from ui.theme import apply_theme
 from ui.tray import TrayIcon
 
@@ -57,10 +58,27 @@ def authenticate(config: ConfigManager, app: QApplication) -> dict | None:
     return dict(profile)
 
 
+def profile_name(profile: dict[str, Any]) -> str:
+    """The name to greet the user with: a person first, the login last.
+
+    The sidebar is 228px wide, so this is the one line that says whose account
+    is signed in.  A login is an email address, which identifies nobody to the
+    person reading it; the account's own name does.  Order: the two name fields
+    the API fills in for a person, then whatever the server calls the account,
+    then the login, which is the only field that is always present.
+    """
+    full = " ".join(
+        part for part in (str(profile.get("first_name") or ""), str(profile.get("last_name") or "")) if part
+    )
+    return full.strip() or str(profile.get("display_name") or profile.get("login") or "").strip()
+
+
 def show_profile(window: MainWindow, profile: dict[str, Any]) -> None:
+    """Fill the sidebar account card from a session profile."""
     window.set_profile(
-        str(profile.get("login") or profile.get("display_name") or ""),
+        profile_name(profile),
         "Подписка Plus" if profile.get("has_plus") else "",
+        str(profile.get("avatar_url") or ""),
     )
 
 
@@ -81,6 +99,9 @@ def build_window(
         engine or AudioEngine(volume=config.get_volume()),
     )
     window = MainWindow(playback, config)
+    apply_theme(app, config.get_theme())
+    settings: SettingsPage = window.pages["settings"]  # type: ignore[assignment]
+    settings.theme_changed.connect(lambda name: apply_theme(app, name))
     return window, playback, {"service": playback.service, "engine": playback.engine}
 
 
@@ -167,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName(ORG_NAME)
     app.setOrganizationDomain(APP_ID)
     app.setDesktopFileName(APP_ID)
+    # Applied before the window exists so the first paint is already themed;
+    # build_window re-applies the stored one and connects the live switch.
     apply_theme(app)
 
     config = ConfigManager()

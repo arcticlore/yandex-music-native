@@ -32,6 +32,7 @@ from core.yandex_service import (
     DEFAULT_COVER_SIZE,
     DEFAULT_DIVERSITY,
     DEFAULT_LANGUAGE,
+    GAPLESS_PREFETCH_RATIO,
     PREFETCH_THRESHOLD,
     QUALITY_AUTO,
     StreamLink,
@@ -162,6 +163,8 @@ class TrackMetadata:
     bitrate: int = 0
     lossless: bool = False
     index: int = -1
+    year: int = 0
+    has_lyrics: bool = False
 
     @property
     def artists_name(self) -> str:
@@ -190,7 +193,15 @@ class TrackMetadata:
             "bitrate": self.bitrate,
             "lossless": self.lossless,
             "index": self.index,
+            "year": self.year,
+            "year_label": str(self.year) if self.year else "",
+            "has_lyrics": self.has_lyrics,
         }
+
+    @property
+    def year_label(self) -> str:
+        """The release year as the drawer shows it, empty when unknown."""
+        return str(self.year) if self.year else ""
 
 
 class _CoverSignals(QObject):
@@ -299,6 +310,8 @@ class PlaybackController(QObject):
         self._current_wave: WaveTrack | None = None
         self._duration_ms = 0
         self._last_position = 0
+        self._last_prefetch_position = 0
+        self._gapless_prefetched: tuple[str, str] | None = None
         self._start_ms = 0
         self._auto_play = True
         self._buffering = False
@@ -593,6 +606,8 @@ class PlaybackController(QObject):
             if not self._engine.seek(0):
                 return False
             self._last_position = 0
+            self._last_prefetch_position = 0
+            self._clear_gapless_prefetch()
             self.position_changed.emit(0, self._duration_ms)
             self.seeked.emit(0)
             return True
@@ -630,6 +645,8 @@ class PlaybackController(QObject):
         if not self._engine.seek(int(position_ms)):
             return False
         self._last_position = self._engine.get_position_ms()
+        self._last_prefetch_position = self._last_position
+        self._clear_gapless_prefetch()
         self.position_changed.emit(self._last_position, self._duration_ms)
         self.seeked.emit(self._last_position)
         return True
@@ -640,11 +657,18 @@ class PlaybackController(QObject):
         self.volume_changed.emit(self._volume)
         return self._volume
 
-    def set_quality(self, quality: str, allow_lossless: bool | None = None) -> None:
-        """Change the quality used for the next resolved links."""
+    def set_quality(self, quality: str, allow_lossless: bool | None = None) -> str:
+        """Change the quality used for the next resolved links.
+
+        The stream that is already playing keeps its own quality: it has been
+        resolved and is downloading, and swapping the URL under a running
+        decoder would be a click.  The return value is the quality now in force,
+        which is the one the *next* track will be fetched at.
+        """
         self._quality = str(quality or QUALITY_AUTO)
         if allow_lossless is not None:
             self._allow_lossless = bool(allow_lossless)
+        return self._quality
 
     # -- marks --------------------------------------------------------------
 
@@ -689,6 +713,8 @@ class PlaybackController(QObject):
         self._engine.stop()
         self._duration_ms = track.duration_ms
         self._last_position = 0
+        self._last_prefetch_position = 0
+        self._clear_gapless_prefetch()
         self._prefetch_ahead()
         cached = self._service.cached_stream(track, self._quality)
         if cached is not None:
@@ -744,6 +770,8 @@ class PlaybackController(QObject):
             bitrate=link.bitrate if link is not None else 0,
             lossless=bool(link.lossless) if link is not None else False,
             index=index,
+            year=track.year,
+            has_lyrics=track.has_lyrics,
         )
 
     def _prefetch_ahead(self) -> None:
@@ -753,6 +781,37 @@ class PlaybackController(QObject):
         if nxt is None or self.remaining > PREFETCH_THRESHOLD:
             return
         self._service.stream_url(nxt, self._quality, self._allow_lossless)
+
+    def _prefetch_at_gapless_point(self, position_ms: int) -> None:
+        """Fetch the next link once the current track is 80% done.
+
+        Doing this from the position clock rather than at the start of a track is
+        what makes a queue feel gapless: the request has the whole tail of the
+        song to land in, so the handover usually has a warm link to use.  It runs
+        at most once per ``(track, quality)`` - a poll fires every 200 ms, and
+        a second identical request would only race the first one for the cache.
+        """
+        current = self._current
+        if current is None or self._duration_ms <= 0:
+            return
+        if position_ms < int(self._duration_ms * GAPLESS_PREFETCH_RATIO):
+            return
+        key = (current.id, self._quality)
+        if key == self._gapless_prefetched:
+            return
+        nxt = self._next_track()
+        if nxt is None:
+            self._gapless_prefetched = key
+            return
+        if self._service.cached_stream(nxt, self._quality) is not None:
+            self._gapless_prefetched = key
+            return
+        if self._service.stream_url(nxt, self._quality, self._allow_lossless):
+            self._gapless_prefetched = key
+
+    def _clear_gapless_prefetch(self) -> None:
+        """Forget the per-track marker so a new track arms the trigger again."""
+        self._gapless_prefetched = None
 
     def _next_track(self) -> WaveTrack | None:
         if self._mode == QueueMode.RADIO:
@@ -851,7 +910,11 @@ class PlaybackController(QObject):
         if position == self._last_position:
             return
         self._last_position = position
+        if position < self._last_prefetch_position:
+            self._clear_gapless_prefetch()
+        self._last_prefetch_position = position
         self.position_changed.emit(position, self._duration_ms)
+        self._prefetch_at_gapless_point(position)
 
     def _played_seconds(self) -> float:
         return max(0.0, self._engine.get_position_ms() / 1000.0)
@@ -1010,6 +1073,8 @@ class PlaybackController(QObject):
         self._current_wave = None
         self._duration_ms = 0
         self._last_position = 0
+        self._last_prefetch_position = 0
+        self._clear_gapless_prefetch()
         self._set_buffering(False)
         self.position_changed.emit(0, 0)
         self._refresh_state()

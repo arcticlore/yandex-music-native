@@ -38,21 +38,16 @@ from PySide6.QtWidgets import (
 
 from core.yandex_service import WaveTrack, track_cover_url
 from ui.theme import (
-    ACCENT,
+    on_theme_changed,
+    token,
     COVER_SIZE,
-    LIKE_ACTIVE,
     PANEL,
-    PLAYING_BG,
     ROW_HEIGHT,
-    ROW_HOVER,
     ROW_RADIUS,
     SPACE_MD,
     SPACE_SM,
     SURFACE,
-    SURFACE_HOVER,
-    TEXT,
     TEXT_DIM,
-    TEXT_MUTED,
     tint,
 )
 from ui.widgets.cover_loader import CoverLoader, cached_pixmap
@@ -82,6 +77,12 @@ EXPLICIT_GLYPH = "E"
 PLACEHOLDER_TOP = SURFACE
 PLACEHOLDER_BOTTOM = PANEL
 """The placeholder gradient is made of two existing surfaces, not new colours."""
+
+
+def _placeholder_pixmap() -> QPixmap:
+    """The «no cover» gradient for the active theme."""
+    return placeholder_pixmap(COVER_SIZE, ROW_RADIUS, token("SURFACE"), token("PANEL"))
+
 
 #: Item data roles the delegate reads.  ``UserRole`` keeps the plain index.
 _ROLE_INDEX = int(Qt.ItemDataRole.UserRole) + 1
@@ -196,7 +197,17 @@ class TrackRowDelegate(QStyledItemDelegate):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._covers: dict[int, QPixmap] = {}
-        self._placeholder = placeholder_pixmap(COVER_SIZE, ROW_RADIUS, PLACEHOLDER_TOP, PLACEHOLDER_BOTTOM)
+        self._placeholder = _placeholder_pixmap()
+        # The gradient is a pixmap, so a theme switch has to rebuild it: a style
+        # sheet cannot repaint something Qt has already cached as an image.
+        self._theme_watch = on_theme_changed(self._on_theme_changed)
+        self.destroyed.connect(self._theme_watch)
+
+    def _on_theme_changed(self, _name: str) -> None:
+        self._placeholder = _placeholder_pixmap()
+        viewport = self.parent()
+        if viewport is not None and hasattr(viewport, "viewport"):
+            viewport.viewport().update()
 
     # -- geometry ------------------------------------------------------------
 
@@ -264,15 +275,15 @@ class TrackRowDelegate(QStyledItemDelegate):
 
         # Every row gets the same base surface: no transparent rows, no gaps
         # between the resting and the highlighted state.
-        self._fill(painter, painted, QColor(PANEL), ROW_RADIUS)
+        self._fill(painter, painted, QColor(token("PANEL")), ROW_RADIUS)
         if hovered and not selected and not playing:
-            self._fill(painter, painted, tint(PANEL, ROW_HOVER), ROW_RADIUS)
+            self._fill(painter, painted, tint(token("PANEL"), token("ROW_HOVER")), ROW_RADIUS)
         if playing:
             # A soft gold wash instead of a hard bar: the current track is
             # obvious, yet the row keeps the same geometry as every other one.
-            self._fill(painter, painted, tint(PANEL, PLAYING_BG), ROW_RADIUS)
+            self._fill(painter, painted, tint(token("PANEL"), token("PLAYING_BG")), ROW_RADIUS)
         elif selected:
-            self._fill(painter, painted, QColor(SURFACE_HOVER), ROW_RADIUS)
+            self._fill(painter, painted, QColor(token("SURFACE_HOVER")), ROW_RADIUS)
 
         columns = row_columns(painted.width())
         top = painted.top() + (ROW_HEIGHT - COVER_SIZE) // 2
@@ -309,12 +320,12 @@ class TrackRowDelegate(QStyledItemDelegate):
                     14,
                     16,
                 ),
-                ACCENT,
+                token("ACCENT"),
             )
             return
         font = self._font(META_FONT_PX)
         painter.setFont(font)
-        painter.setPen(QColor(TEXT_MUTED))
+        painter.setPen(QColor(token("TEXT_MUTED")))
         painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), str(index.data(_ROLE_NUMBER) or ""))
 
     def _paint_texts(
@@ -330,7 +341,7 @@ class TrackRowDelegate(QStyledItemDelegate):
         title_rect = QRect(columns.text_x, row.top() + SPACE_MD, columns.text_width, 20)
         title_font = self._font(TITLE_FONT_PX, bold=True)
         painter.setFont(title_font)
-        painter.setPen(QColor(ACCENT if playing else TEXT))
+        painter.setPen(QColor(token("ACCENT") if playing else token("TEXT")))
         painter.drawText(
             title_rect,
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
@@ -355,7 +366,7 @@ class TrackRowDelegate(QStyledItemDelegate):
         rect = QRect(columns.album_x, row.top(), columns.album_width, row.height())
         font = self._font(META_FONT_PX)
         painter.setFont(font)
-        painter.setPen(QColor(TEXT_MUTED))
+        painter.setPen(QColor(token("TEXT_MUTED")))
         painter.drawText(
             rect,
             int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
@@ -373,7 +384,7 @@ class TrackRowDelegate(QStyledItemDelegate):
         rect = QRect(columns.time_x, row.top(), columns.time_width, row.height())
         font = self._font(META_FONT_PX, mono=True)
         painter.setFont(font)
-        painter.setPen(QColor(TEXT if playing else TEXT_DIM))
+        painter.setPen(QColor(token("TEXT") if playing else token("TEXT_DIM")))
         painter.drawText(
             rect,
             int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
@@ -385,15 +396,15 @@ class TrackRowDelegate(QStyledItemDelegate):
         liked = bool(index.data(_ROLE_LIKED))
         font = self._font(14, bold=True)
         painter.setFont(font)
-        painter.setPen(QColor(LIKE_ACTIVE if liked else TEXT_MUTED))
+        painter.setPen(QColor(token("LIKE_ACTIVE") if liked else token("TEXT_MUTED")))
         painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), HEART if liked else HEART_OFF)
         if not index.data(_ROLE_EXPLICIT):
             return
         badge = QRect(rect.left() + 1, row.center().y() - 7, 14, 14)
-        self._fill(painter, badge, QColor(TEXT_MUTED), 4)
+        self._fill(painter, badge, QColor(token("TEXT_MUTED")), 4)
         badge_font = self._font(9, bold=True)
         painter.setFont(badge_font)
-        painter.setPen(QColor(PANEL))
+        painter.setPen(QColor(token("PANEL")))
         painter.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), EXPLICIT_GLYPH)
 
     def _paint_thumb(self, painter: QPainter, rect: QRect, index) -> None:
