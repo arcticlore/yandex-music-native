@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QListWidgetItem,
     QVBoxLayout,
@@ -26,7 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.playback_controller import PlaybackController
-from ui.theme import PAGE_PADDING, SPACE_LG
+from ui.theme import PAGE_PADDING, SPACE_LG, SPACE_SM
+from ui.widgets.loading import Spinner
 from ui.widgets.results_panel import ResultsPanel, header_row
 from ui.widgets.track_list import TrackList, entry_item
 
@@ -122,9 +124,19 @@ class CollectionPage(QWidget):
         root.addWidget(self.panel, 1)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+        # The request is async, so the only honest thing the page can do while
+        # it waits is say so: a spinner next to the status line, driven by the
+        # same pending set the loader uses, rather than a stale count that looks
+        # like an answer.
+        self.spinner = Spinner(16)
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(SPACE_SM)
         self.status_label = QLabel("")
         self.status_label.setObjectName("Dim")
-        root.addWidget(self.status_label)
+        status_row.addWidget(self.spinner)
+        status_row.addWidget(self.status_label, 1)
+        root.addLayout(status_row)
 
     # -- public API ---------------------------------------------------------
 
@@ -149,9 +161,39 @@ class CollectionPage(QWidget):
             self.status_label.setText(f"Неизвестный раздел: {target}")
             return False
         started = self._controller.service.load_liked(target)
-        if not started:
+        if started:
+            self._pending.add(target)
+            self._sync_loading(target)
+        else:
             self.status_label.setText("Не удалось загрузить коллекцию")
         return started
+
+    @property
+    def is_loading(self) -> bool:
+        """Whether any section is still waiting for the network."""
+        return bool(self._pending)
+
+    def set_animations_enabled(self, enabled: bool) -> None:
+        """Follow the global animation switch while a request is in flight."""
+        self.spinner.set_animations_enabled(enabled)
+
+    def _sync_loading(self, section: str | None = None) -> None:
+        """Show the spinner while ``section`` is outstanding.
+
+        The wording is per tab, because «Загружаем любимые треки…» next to a
+        tab of albums is confusing, and a finished count must not be left
+        standing next to a spinner for a *different* tab that is still loading.
+        """
+        if section is not None and section not in self._pending:
+            self.spinner.stop()
+            return
+        if not self._pending:
+            self.spinner.stop()
+            return
+        waiting = section if section is not None else self.current_section()
+        if waiting in self._pending:
+            self.status_label.setText(f"Загружаем: {SECTION_TITLES[waiting].lower()}…")
+        self.spinner.start()
 
     def reload(self) -> None:
         self.refresh()
@@ -168,6 +210,7 @@ class CollectionPage(QWidget):
             return
         self._loaded.add(section)
         self._pending.discard(section)
+        self._sync_loading()
         if isinstance(page, TrackList):
             tracks = list(items or ())
             page.set_tracks(tracks)
@@ -188,6 +231,7 @@ class CollectionPage(QWidget):
         # retrying a section that did succeed is cheap, guessing wrong is not.
         self._loaded.difference_update(self._pending)
         self._pending.clear()
+        self.spinner.stop()
         self.status_label.setText(message)
 
 

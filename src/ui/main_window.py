@@ -80,6 +80,7 @@ from ui.widgets.icons import visualizer_icon
 from ui.widgets.like_button import LikeButton
 from ui.widgets.now_playing_drawer import NowPlayingDrawer
 from ui.widgets.track_list import format_duration
+from ui.widgets.visualizer import FULL_SCALE_VOLUME
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ THREAD_JOIN_MS = 1500
 VOLUME_STEP = 5
 LOSSLESS_BADGE = "FLAC"
 LOSSY_BADGE = "HQ"
+HQ_320_BADGE = "HQ 320"
 QUALITY_AUTO = "auto"
 MIN_WINDOW = (900, 600)
 """The smallest window that still fits the shell.
@@ -126,15 +128,23 @@ MODE_BUTTON_TOOLTIP = "Режим визуализации"
 
 
 def quality_badge(track: object | None) -> str:
-    """Short quality pill for the player bar: ``FLAC`` or ``HQ``.
+    """Short quality pill for the player bar: ``FLAC``, ``HQ 320`` or ``192``.
 
-    The bar has 260px for the whole left section, so the pill carries the flag
-    and not the bitrate; the full wording stays available as the tooltip.
+    It reports the stream that was actually resolved, not the one that was
+    asked for.  «HQ» with no number is what made the setting look broken: a
+    file at 192 kbps wore the same pill as one at 320, so there was nothing on
+    screen to contradict it.  The pill now carries the bitrate it received and
+    stays within the left section's width; the long form is the tooltip.
     """
     if track is None:
         return ""
     if getattr(track, "lossless", False):
         return LOSSLESS_BADGE
+    bitrate = int(getattr(track, "bitrate", 0) or 0)
+    if bitrate >= 320:
+        return HQ_320_BADGE
+    if bitrate:
+        return f"{bitrate}"
     return LOSSY_BADGE
 
 
@@ -144,10 +154,12 @@ def quality_detail(track: object | None) -> str:
         return ""
     if getattr(track, "lossless", False):
         return "FLAC Lossless"
-    quality = str(getattr(track, "quality", "") or "").strip()
-    if quality:
-        return quality.upper()
+    codec = str(getattr(track, "quality", "") or "").strip().upper()
     bitrate = int(getattr(track, "bitrate", 0) or 0)
+    if codec and bitrate:
+        return f"{codec} {bitrate} kbps"
+    if codec:
+        return codec
     return f"{bitrate} kbps" if bitrate else LOSSY_BADGE
 
 
@@ -221,6 +233,8 @@ class MainWindow(QMainWindow):
         self._artist_text = ""
         self._profile_text = "Не авторизован"
         self._profile_hint_text = ""
+        self._animations_enabled = True
+        self._volume_normalized = False
         self._avatar_url = ""
         self._quality_pending = False
         self.setWindowTitle(APP_NAME)
@@ -629,7 +643,7 @@ class MainWindow(QMainWindow):
         controller.cover_ready.connect(self._on_cover)
         controller.fft_data_ready.connect(self._on_fft)
         controller.waveform_data_ready.connect(self._on_waveform)
-        controller.volume_changed.connect(lambda _value: self._refresh_volume())
+        controller.volume_changed.connect(self._on_volume_changed)
         controller.seeked.connect(lambda _value: self._refresh_seek())
         controller.playback_error.connect(self._show_error)
         controller.wave_error.connect(self._show_error)
@@ -641,9 +655,22 @@ class MainWindow(QMainWindow):
         settings: SettingsPage = self.pages["settings"]  # type: ignore[assignment]
         settings.visualizer_changed.connect(self.set_visualizer_mode)
         settings.quality_changed.connect(self.set_quality)
+        # Both switches reach the widgets that draw, not just the config file: a
+        # preference that only takes effect after a restart is one nobody trusts
+        # enough to change.
+        settings.animations_changed.connect(self.set_animations_enabled)
+        settings.normalization_changed.connect(self.set_volume_normalization)
+        settings.logout_requested.connect(self.logout_requested.emit)
+        settings.cache_cleared.connect(lambda: self._controller.clear_cover_cache())
+        # Whatever the stored values say, the live widgets start in that state.
+        self.set_animations_enabled(self._config.animations_enabled())
+        self.set_volume_normalization(self._config.volume_normalization())
         # A click on the stage changes the style behind the button, so the icon
         # and the tooltip follow it in both directions.
         self.wave_page.visualizer_mode_changed.connect(lambda _mode: self._refresh_mode_button())
+        # The stage compensates for the volume, so it has to be told the current
+        # one before the first frame arrives, not only on the next change.
+        self.wave_page.visualizer.set_volume(controller.volume)
         self.show_page("wave")
 
     def _install_shortcuts(self) -> None:
@@ -710,6 +737,11 @@ class MainWindow(QMainWindow):
         self._set_elided(self.profile_hint, "_profile_hint_text", hint)
         self.plus_badge.setVisible(bool(detail) and signed_in)
         self.logout_button.setEnabled(signed_in)
+        # The settings page has its own account card, and two cards that
+        # disagree about who is signed in are worse than one.
+        settings: SettingsPage | None = self.pages.get("settings")  # type: ignore[assignment]
+        if settings is not None:
+            settings.set_account(login, detail if signed_in else "")
         self.set_avatar(avatar_url if signed_in else "")
 
     def set_avatar(self, url: str) -> None:
@@ -732,11 +764,54 @@ class MainWindow(QMainWindow):
         if masked is not None:
             self.avatar_label.setPixmap(masked)
             self.avatar_label.setToolTip("")
+        settings: SettingsPage | None = self.pages.get("settings")  # type: ignore[assignment]
+        if settings is not None:
+            settings.set_avatar_pixmap(masked)
 
     def _on_avatar_loaded(self, url: str, pixmap) -> None:
         self._show_avatar(url, pixmap)
 
     # -- player bar ---------------------------------------------------------
+
+    def _on_volume_changed(self, value: int) -> None:
+        """Follow the slider, and undo it on the stage unless asked not to."""
+        self._refresh_volume()
+        # With normalisation on the stage is told about 0, so it keeps drawing at
+        # full scale; with it off the real value goes through and the picture
+        # dips as the knob does.  The slider itself is the same either way.
+        self.wave_page.visualizer.set_volume(FULL_SCALE_VOLUME if self._volume_normalized else int(value))
+
+    def set_animations_enabled(self, enabled: bool) -> bool:
+        """Stop or start everything that animates, everywhere, at once.
+
+        The pieces are the visualizer clocks, the karaoke scroll and the loading
+        spinner: each of them is a repaint loop that runs whether or not anyone
+        is looking at it, so the switch has to reach all of them rather than
+        only the stage the user happened to be looking at.
+        """
+        enabled = bool(enabled)
+        self._animations_enabled = enabled
+        self.wave_page.visualizer.set_animations_enabled(enabled)
+        self.drawer.set_animations_enabled(enabled)
+        collection: CollectionPage = self.pages["collection"]  # type: ignore[assignment]
+        collection.set_animations_enabled(enabled)
+        settings: SettingsPage = self.pages["settings"]  # type: ignore[assignment]
+        settings.set_animations_enabled(enabled)
+        return enabled
+
+    def set_volume_normalization(self, enabled: bool) -> bool:
+        """Whether the stage keeps its level when the volume moves.
+
+        The tap reads the sink, so the frames arrive after mpv applied the
+        volume.  With this on the stage divides it back out and looks the same
+        at 20% as at 100%; with it off the level follows the knob, which is what
+        a knob that says «volume» means to most people.
+        """
+        enabled = bool(enabled)
+        self._volume_normalized = enabled
+        visualizer = self.wave_page.visualizer
+        visualizer.set_volume(FULL_SCALE_VOLUME if enabled else self._controller.volume)
+        return enabled
 
     def set_visualizer_mode(self, mode: str) -> str:
         result = self.wave_page.set_visualizer_mode(mode)

@@ -355,6 +355,39 @@ def test_restore_deletes_token_on_unauthorized(app: QCoreApplication) -> None:
     check("403: token kept", cfg2.get_token() == "stored-token-000000000")
     check("403: not a rejection", AuthService.is_token_rejected(forbidden) is False)
 
+    # The digits alone are not a status: an address, a port or a byte count that
+    # happens to contain "401" must never cost the user their session.
+    for name, message in {
+        "an address": "connection to 10.0.0.1401 refused",
+        "a port": "tried 127.0.0.1:4013",
+        "a byte count": "read 40124 bytes then EOF",
+        "a model id": "track 401 xyz not found",
+    }.items():
+        exc = RuntimeError(message)
+        cfg, errors, statuses, received = _restore(app, exc)
+        check(f"{name} containing 401: token kept", cfg.get_token() == "stored-token-000000000", name)
+        check(f"{name} containing 401: not a rejection", AuthService.is_token_rejected(exc) is False, name)
+        check(f"{name} containing 401: auth_error emitted", len(errors) == 1, f"{name} {errors}")
+
+    for name, message in {
+        "an http status": "HTTP 401 returned by the API",
+        "a status code": "request failed, status code: 401",
+        "a Russian status": "сервер вернул код 401",
+    }.items():
+        exc = RuntimeError(message)
+        cfg, _errors, statuses, _received = _restore(app, exc)
+        check(f"{name}: token deleted", cfg.get_token() is None, name)
+        check(f"{name}: classified as a rejection", AuthService.is_token_rejected(exc) is True, name)
+
+    for name, message in {
+        "an http 403": "HTTP 403 returned by the API",
+        "a status 403": "status code 403: no rights",
+    }.items():
+        exc = RuntimeError(message)
+        cfg, _errors, _statuses, _received = _restore(app, exc)
+        check(f"{name}: token kept", cfg.get_token() == "stored-token-000000000", name)
+        check(f"{name}: not a rejection", AuthService.is_token_rejected(exc) is False, name)
+
     text = RuntimeError("Invalid token supplied")
     cfg3, _errors3, _statuses3, _received3 = _restore(app, text)
     check("invalid token text: token deleted", cfg3.get_token() is None)

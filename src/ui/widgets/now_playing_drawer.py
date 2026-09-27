@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.lyrics import Lyrics, parse_lrc
 from core.playback_controller import PlaybackController, TrackMetadata
 from ui.theme import (
     BADGE_HEIGHT,
@@ -34,12 +35,22 @@ from ui.theme import (
     SPACE_XS,
 )
 from ui.widgets.cover_frame import CoverFrame
+from ui.widgets.karaoke import GlowLabel, KaraokeView
 
 DRAWER_WIDTH = 320
 """The panel is fixed-width so opening it never reflows the page underneath."""
 
 DRAWER_COVER = 250
 """A 250px cover: the one place in the app where the art is the interface."""
+
+LYRICS_MIN_HEIGHT = 150
+LYRICS_MAX_HEIGHT = 300
+"""The lyric column takes the room the cover leaves, but never the whole panel.
+
+A karaoke view needs to be tall enough to show the current line with the one
+before and after it - three lines of context - and no taller, because the cover
+and the technical box above it are the parts of this panel people came for.
+"""
 
 __all__ = ["DRAWER_COVER", "DRAWER_WIDTH", "NowPlayingDrawer"]
 
@@ -61,6 +72,32 @@ def _format_codec(meta: TrackMetadata) -> str:
     if codec in {"flac", "alac", "wav"}:
         return codec.upper()
     return codec.upper()
+
+
+class _LyricsTextProxy:
+    """Presents a :class:`KaraokeView` through the old ``QLabel`` surface.
+
+    The drawer used to hold one label with the whole text in it.  Tests and the
+    window still ask for ``drawer.lyrics_label.text()``, so rather than
+    breaking that contract the karaoke view answers it: the words of the
+    karaoke view, joined by newlines.
+    """
+
+    def __init__(self, view: KaraokeView, owner: QWidget) -> None:
+        self._view = view
+        self._owner = owner
+
+    def text(self) -> str:
+        return "\n".join(label.text() for label in self._view.findChildren(GlowLabel) if label.text())
+
+    def setText(self, text: str) -> None:  # noqa: N802 - QLabel naming
+        self._view.set_lyrics(parse_lrc(text))
+
+    def isVisible(self) -> bool:  # noqa: N802 - QLabel naming
+        return self._view.isVisible()
+
+    def __getattr__(self, name: str):
+        return getattr(self._view, name)
 
 
 class NowPlayingDrawer(QFrame):
@@ -87,6 +124,9 @@ class NowPlayingDrawer(QFrame):
         self._controller = controller
         self._meta: TrackMetadata | None = None
         self._lyrics_track_id = ""
+        self._lyrics = Lyrics()
+        self._position_ms = 0
+        self._animations_enabled: bool | None = None
         self.setObjectName("NowPlayingDrawer")
         self.setFixedWidth(DRAWER_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
@@ -196,20 +236,23 @@ class NowPlayingDrawer(QFrame):
         return row
 
     def _build_lyrics(self) -> QWidget:
-        self.lyrics_label = QLabel("")
-        self.lyrics_label.setObjectName("DrawerLyrics")
-        self.lyrics_label.setWordWrap(True)
-        self.lyrics_label.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.lyrics_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.lyrics_label.setVisible(False)
-        self.lyrics_label.setMaximumHeight(160)
-        return self.lyrics_label
+        """The lyric panel: a karaoke column when the text has timings."""
+        self.lyrics_view = KaraokeView()
+        self.lyrics_view.setObjectName("DrawerLyrics")
+        self.lyrics_view.setVisible(False)
+        self.lyrics_view.setMinimumHeight(LYRICS_MIN_HEIGHT)
+        self.lyrics_view.setMaximumHeight(LYRICS_MAX_HEIGHT)
+        # The name the old plain label had is kept as a property so anything
+        # outside this file that asked for the label still finds the text.
+        self.lyrics_label = _LyricsTextProxy(self.lyrics_view, self)
+        return self.lyrics_view
 
     def _connect(self, controller: PlaybackController) -> None:
         self._on_track(controller.current)
         controller.track_changed.connect(self._on_track)
         controller.cover_ready.connect(self._on_cover)
         controller.volume_changed.connect(self._on_volume)
+        controller.position_changed.connect(self._on_position)
         self.lyrics_loaded.connect(self._on_lyrics_loaded)
 
     # -- content -------------------------------------------------------------
@@ -217,6 +260,7 @@ class NowPlayingDrawer(QFrame):
     def set_track(self, meta: TrackMetadata | None) -> None:
         """Show ``meta``; ``None`` empties the panel and disables the actions."""
         self._meta = meta
+        self._position_ms = 0
         if meta is None:
             self.title_label.setText("Ничего не играет")
             self.artist_label.setText("—")
@@ -256,20 +300,59 @@ class NowPlayingDrawer(QFrame):
             self.cover.set_pixmap(pixmap)
 
     def set_lyrics(self, track_id: str, text: str) -> None:
-        """Show the lyrics of ``track_id`` in the panel, hiding them when empty."""
+        """Show the lyrics of ``track_id`` in the panel, hiding them when empty.
+
+        The payload is parsed here rather than in the service, because whether
+        the text can be followed in time is a property of the words, and the
+        drawer is what has to follow them.  Untimed text is not a failure: it is
+        shown as a static block.
+        """
         if track_id != self._current_id:
             return
-        if not text.strip():
+        lyrics = parse_lrc(text)
+        if lyrics.empty:
             self._hide_lyrics()
             return
         self._lyrics_track_id = track_id
-        self.lyrics_label.setText(text.strip())
-        self.lyrics_label.setVisible(True)
+        self._lyrics = lyrics
+        self.lyrics_view.set_lyrics(lyrics)
+        self.lyrics_view.setVisible(True)
+        # A track that is already part-way through needs its line lit at once;
+        # waiting for the next position tick would leave the first line dark.
+        if lyrics.synchronized:
+            self.lyrics_view.set_position(int(self._controller.position_ms))
+        if self._animations_enabled is not None:
+            self.lyrics_view.set_animations_enabled(self._animations_enabled)
+
+    def set_position(self, position_ms: int) -> None:
+        """Follow the track: called on every position tick."""
+        self._position_ms = int(position_ms)
+        if self._lyrics_track_id and self.lyrics_view.isVisible():
+            self.lyrics_view.set_position(int(position_ms))
+
+    def set_animations_enabled(self, enabled: bool) -> None:
+        """Follow the global switch while a lyric is on screen."""
+        self._animations_enabled = bool(enabled)
+        self.lyrics_view.set_animations_enabled(enabled)
+
+    @property
+    def lyrics(self) -> Lyrics:
+        """The parsed lyric, so tests and the window can see what is shown."""
+        return self._lyrics
+
+    @property
+    def synchronized(self) -> bool:
+        return self._lyrics.synchronized
+
+    @property
+    def current_lyric_index(self) -> int:
+        return self.lyrics_view.current_index
 
     def _hide_lyrics(self) -> None:
         self._lyrics_track_id = ""
-        self.lyrics_label.setText("")
-        self.lyrics_label.setVisible(False)
+        self._lyrics = Lyrics()
+        self.lyrics_view.clear()
+        self.lyrics_view.setVisible(False)
 
     @property
     def _current_id(self) -> str:
@@ -317,6 +400,9 @@ class NowPlayingDrawer(QFrame):
 
     def _on_volume(self, value: int) -> None:
         self.volume_label.setText(f"{int(value)}%")
+
+    def _on_position(self, position_ms: int, _duration_ms: int = 0) -> None:
+        self.set_position(position_ms)
 
     def _on_album(self) -> None:
         if self._meta is not None and self._meta.album:

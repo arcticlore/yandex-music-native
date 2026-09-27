@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os
 import random
+import shutil
 import urllib.parse
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -1002,6 +1003,23 @@ class PlaybackController(QObject):
         )
 
     # -- covers -------------------------------------------------------------
+
+    def clear_cover_cache(self) -> int:
+        """Delete the cached cover files and forget the paths.
+
+        The in-memory map is dropped too, otherwise the next track would be
+        told its cover is at a path that no longer exists and the row would keep
+        a stale filename.
+        """
+        # The cover map is only ever touched on the GUI thread - the pool
+        # reports back through queued signals - so this needs no lock.
+        self._cover_paths.clear()
+        removed = 0
+        if self._cover_dir.exists():
+            removed = sum(1 for entry in self._cover_dir.rglob("*") if entry.is_file())
+            shutil.rmtree(self._cover_dir, ignore_errors=True)
+        log.info("cover cache cleared: %s files", removed)
+        return removed
 
     def _ensure_cover(self, meta: TrackMetadata) -> None:
         if not meta.cover_url or meta.id in self._cover_inflight:

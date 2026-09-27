@@ -92,16 +92,21 @@ def build_window(
 ) -> tuple[MainWindow, PlaybackController, dict[str, Any]]:
     """Create the playback stack and the window for an authorised session."""
     token = config.get_token() or ""
-    if controller is None and not token:
+    if controller is None and service is None and not token:
         raise RuntimeError("Нет сохранённого токена: войдите в аккаунт заново")
     playback = controller or PlaybackController(
         service or YandexService(token),
         engine or AudioEngine(volume=config.get_volume()),
+        # The saved quality has to be handed to the controller at startup, not
+        # only through the settings page: otherwise every launch plays «auto»
+        # whatever the user picked last, and the setting looks ignored.
+        quality=config.get_quality(),
     )
     window = MainWindow(playback, config)
     apply_theme(app, config.get_theme())
     settings: SettingsPage = window.pages["settings"]  # type: ignore[assignment]
     settings.theme_changed.connect(lambda name: apply_theme(app, name))
+    window.logout_requested.connect(lambda: logout_and_restart(config, app, window))
     return window, playback, {"service": playback.service, "engine": playback.engine}
 
 
@@ -151,6 +156,22 @@ def restore_session_in_background(
     auth.auth_error.connect(on_error)
     auth.restore_session()
     return auth
+
+
+def logout_and_restart(config: ConfigManager, app: QApplication, window: MainWindow) -> None:
+    """Forget the session and start over.
+
+    The token goes first and the process is replaced, not just the window
+    closed: a running ``YandexService`` still holds the old token on its worker
+    thread, so a same-process return to the login dialog would leave a
+    half-authenticated app that looks signed in.  A restart is the only state
+    here that is genuinely clean.
+    """
+    config.delete_token()
+    log.info("signed out by the user")
+    window.statusBar().showMessage("Вы вышли из аккаунта", 4000)
+    QProcess.startDetached(sys.executable, [sys.argv[0]])
+    app.quit()
 
 
 def attach_integrations(

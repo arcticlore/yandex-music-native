@@ -194,6 +194,10 @@ class FakeClient:
         self.station_error: Exception | None = None
         self.feedback_error: Exception | None = None
         self.like_error: Exception | None = None
+        self.lyrics_calls: list[tuple[str, str]] = []
+        self.lyrics_by_format: dict[str, str] = {}
+        self.lyrics_error: Exception | None = None
+        self.track_lyrics_fallback: list = []
         self.download_error: Exception | None = None
 
     def init(self) -> None:
@@ -289,6 +293,25 @@ class FakeClient:
         if self.download_error is not None:
             raise self.download_error
         return list(self.variants)
+
+    def tracks_lyrics(self, track_id, format_="TEXT", **kwargs):
+        self.calls.append("tracks_lyrics")
+        self.lyrics_calls.append((str(track_id), format_))
+        if self.lyrics_error is not None:
+            raise self.lyrics_error
+        body = self.lyrics_by_format.get(format_)
+        if body is None:
+            return None
+        # A real TrackLyrics hands back a URL; the words are a second request.
+        return SimpleNamespace(download_url="https://lyrics.invalid/x", fetch_lyrics=lambda: body)
+
+    def tracks(self, track_ids, **kwargs):
+        self.calls.append("tracks")
+        wanted = str(track_ids) if not isinstance(track_ids, (list, tuple)) else str(track_ids[0])
+        for entry in self.track_lyrics_fallback:
+            if str(entry.id) == wanted:
+                return [entry]
+        return []
 
 
 def make_service(token: str = "token-1", setup: object = None) -> tuple[YandexService, FakeClient]:
@@ -419,6 +442,115 @@ def test_select_variant() -> None:
         select_variant([make_download("aac", 320), make_download("mp3", 320)], QUALITY_HIGH).codec == "mp3",
     )
     check("variant no bitrate field", select_variant([FakeVariant("mp3", 0)]) is not None)
+
+    # The bug the setting was hiding: a lossy request must never be answered
+    # with a lossless file, and a «320» request must be the 320 that is on offer.
+    only_lossless = [flac]
+    check(
+        "320 without a lossy variant falls back rather than guessing",
+        select_variant(only_lossless, "320").codec == "flac",
+    )
+    check(
+        "lossless without flac falls back to 320, not 192",
+        select_variant([mp3_192, mp3_320], QUALITY_LOSSLESS, False).bitrate_in_kbps == 320,
+    )
+    check(
+        "a 320 request takes the 320 and not the 1411",
+        select_variant([flac, mp3_192, mp3_320], "320").bitrate_in_kbps == 320,
+    )
+    check(
+        "a 192 request takes the 192",
+        select_variant([flac, mp3_192, mp3_320], "192").bitrate_in_kbps == 192,
+    )
+    check(
+        "a 192 request with only 320 available takes the 320",
+        select_variant([flac, mp3_320], "192").bitrate_in_kbps == 320,
+    )
+    check(
+        "a 320 request with only 192 available does not pretend",
+        select_variant([flac, mp3_192], "320").bitrate_in_kbps == 192,
+    )
+    check(
+        "auto without lossless picks the best lossy",
+        select_variant([mp3_192, mp3_320], QUALITY_AUTO, False).bitrate_in_kbps == 320,
+    )
+    check(
+        "a real 320 is never swapped for a same-size aac",
+        select_variant([make_download("aac", 320), make_download("flac", 1411)], "320").codec == "aac",
+    )
+
+
+def test_lyrics_prefers_the_timed_format(app: QApplication) -> None:
+    """The karaoke view needs LRC, and a miss must still produce a lyric."""
+    from core.lyrics import parse_lrc
+
+    lrc = "[00:12.00]Строка\n[00:15.00]Другая"
+    service, client = make_service(setup=lambda c: c.lyrics_by_format.update({"LRC": lrc, "TEXT": "Просто"}))
+    service.start()
+    got: list[tuple[str, str]] = []
+    service.lyrics_ready.connect(lambda track, body: got.append((track, body)))
+
+    track = SimpleNamespace(id="42", title="Песня")
+    check("the request was accepted", service.lyrics(track) is True)
+    settle(app, service)
+    check(
+        "the LRC format was asked for first",
+        client.lyrics_calls[0] == ("42", "LRC"),
+        str(client.lyrics_calls),
+    )
+    check("the timed text came back", got and got[0] == ("42", lrc), str(got))
+    check("and it really is synchronised", parse_lrc(got[0][1]).synchronized is True)
+    check("no plain request was needed", len(client.lyrics_calls) == 1, str(client.lyrics_calls))
+
+    service2, client2 = make_service(setup=lambda c: c.lyrics_by_format.update({"TEXT": "Просто текст"}))
+    service2.start()
+    got2: list[tuple[str, str]] = []
+    service2.lyrics_ready.connect(lambda track, body: got2.append((track, body)))
+    service2.lyrics(track)
+    settle(app, service2)
+    check(
+        "a track with no timings falls back to plain text",
+        [body for _track, body in got2] == ["Просто текст"],
+        str(got2),
+    )
+    check(
+        "and both formats were tried",
+        [fmt for _track, fmt in client2.lyrics_calls] == ["LRC", "TEXT"],
+        str(client2.lyrics_calls),
+    )
+    check("the fallback is not synchronised", parse_lrc(got2[0][1]).synchronized is False)
+
+    service3, client3 = make_service(
+        setup=lambda c: c.track_lyrics_fallback.append(SimpleNamespace(id="7", lyrics="Из трека"))
+    )
+    service3.start()
+    got3: list[tuple[str, str]] = []
+    service3.lyrics_ready.connect(lambda track, body: got3.append((track, body)))
+    service3.lyrics(SimpleNamespace(id="7", title="Песня"))
+    settle(app, service3)
+    check(
+        "a client without the lyrics endpoint still works",
+        [body for _track, body in got3] == ["Из трека"],
+        str(got3),
+    )
+    check("and it did not call the missing endpoint", "tracks_lyrics" in client3.calls)
+
+    plain_only, client4 = make_service()
+    plain_only.start()
+    got4: list[tuple[str, str]] = []
+    plain_only.lyrics_ready.connect(lambda track, body: got4.append((track, body)))
+    plain_only.lyrics(SimpleNamespace(id="9", title="Песня"), synchronized=False)
+    settle(app, plain_only)
+    check("a track with no lyrics anywhere yields no text", got4 == [("9", "")], str(got4))
+    check(
+        "asking for plain text does not try the LRC format",
+        [fmt for _track, fmt in client4.lyrics_calls] == ["TEXT"],
+        str(client4.lyrics_calls),
+    )
+    plain_only.shutdown()
+    service.shutdown()
+    service2.shutdown()
+    service3.shutdown()
 
 
 def test_stream_link() -> None:

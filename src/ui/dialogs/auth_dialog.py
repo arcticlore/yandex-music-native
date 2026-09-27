@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,6 +43,7 @@ from ui.theme import (
     TEXT_DIM as DIM,
     TEXT_MUTED,
 )
+from ui.widgets.loading import Spinner
 
 log = logging.getLogger(__name__)
 
@@ -77,49 +78,6 @@ QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px;
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
 QStackedWidget {{ background: transparent; }}
 """
-
-
-class Spinner(QWidget):
-    """Lightweight indeterminate progress indicator."""
-
-    def __init__(self, size: int = 18, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._angle = 0
-        self._size = size
-        self.setFixedSize(size, size)
-        self._timer = QTimer(self)
-        self._timer.setInterval(60)
-        self._timer.timeout.connect(self._advance)
-        self.setVisible(False)
-
-    def start(self) -> None:
-        self.setVisible(True)
-        self._timer.start()
-        self.update()
-
-    def stop(self) -> None:
-        self._timer.stop()
-        self.setVisible(False)
-
-    def is_spinning(self) -> bool:
-        return self._timer.isActive()
-
-    def _advance(self) -> None:
-        self._angle = (self._angle + 30) % 360
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        if not self.is_spinning():
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(ACCENT), 2.0)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        inset = 3
-        rect = self.rect().adjusted(inset, inset, -inset, -inset)
-        painter.drawArc(rect, -self._angle * 16, -110 * 16)
-        painter.end()
 
 
 class _AvatarLoader(QObject):
@@ -245,7 +203,7 @@ class AuthDialog(QDialog):
 
         status_row = QHBoxLayout()
         status_row.setSpacing(8)
-        self._spinner = Spinner(18)
+        self._spinner = Spinner(18, animations_enabled=self._config.animations_enabled())
         status_row.addWidget(self._spinner)
         self._status = QLabel("Готов к авторизации")
         self._status.setObjectName("Status")

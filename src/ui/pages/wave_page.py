@@ -109,7 +109,7 @@ class WavePage(QWidget):
             "mood": ChipGroup("Настроение", MOOD_CHOICES),
             "activity": ChipGroup("Занятие", ACTIVITY_CHOICES),
             "language": ChipGroup("Язык", LANGUAGE_CHOICES),
-            "diversity": ChipGroup("Подбор", DIVERSITY_CHOICES),
+            "diversity": ChipGroup("Характер", DIVERSITY_CHOICES),
         }
         # Two by two: each axis keeps its own label and its own row of pills, and
         # the four blocks share the width of the page instead of stacking into

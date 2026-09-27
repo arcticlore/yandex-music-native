@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -288,6 +289,12 @@ class FakeClient:
         self.liked_calls: list[tuple[str, object]] = []
         self.hydrate_calls: list[tuple[str, ...]] = []
         self.hydrate_error: Exception | None = None
+        self.liked_error: Exception | None = None
+        self.liked_gate: threading.Event | None = None
+        """Held to keep a liked-section request outstanding, for UI tests."""
+        self.lyrics_calls: list[tuple[str, str]] = []
+        self.lyrics_by_format: dict[str, str] = {}
+        self.lyrics_error: Exception | None = None
         self.full_tracks: list = []
         self.search_result: object = SimpleNamespace(tracks=(), albums=(), artists=(), playlists=())
         self.liked_tracks_result: object = SimpleNamespace(tracks=())
@@ -376,7 +383,21 @@ class FakeClient:
     def users_likes_tracks(self, user_id=None, **kwargs):
         self.calls.append("users_likes_tracks")
         self.liked_calls.append(("tracks", user_id))
+        if self.liked_gate is not None:
+            # The API is not instant, and a test that only ever sees a finished
+            # request cannot see what the UI does while it is outstanding.
+            self.liked_gate.wait(timeout=5.0)
+        if self.liked_error is not None:
+            raise self.liked_error
         return self.liked_tracks_result
+
+    def tracks_lyrics(self, track_id, format_="TEXT", **kwargs):
+        self.calls.append("tracks_lyrics")
+        self.lyrics_calls.append((str(track_id), format_))
+        wanted = self.lyrics_by_format.get(format_)
+        if wanted is None:
+            return None
+        return SimpleNamespace(download_url="ignored", fetch_lyrics=lambda: wanted)
 
     def tracks(self, track_ids, **kwargs):
         self.calls.append("tracks")

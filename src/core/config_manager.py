@@ -48,6 +48,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "theme": DEFAULT_THEME,
     "shuffle": False,
     "repeat": "off",
+    "animations_enabled": True,
+    "volume_normalization": False,
 }
 
 VALID_VISUALIZERS = ("spectrum", "wave", "circular", "meters")
@@ -238,6 +240,32 @@ class ConfigManager:
 
     def set_notifications(self, value: bool) -> None:
         self.set_bool("notifications", value)
+
+    def animations_enabled(self) -> bool:
+        """Whether timers, smooth scrolling and transitions may animate.
+
+        Off means *off*, not «slower»: the visualizer stops repainting, the
+        karaoke lines jump instead of gliding and the drawer appears without a
+        slide.  It is the switch for a machine that cannot spare the CPU, so it
+        has to reach the parts that do the drawing, not just the preferences UI.
+        """
+        return self.get_bool("animations_enabled", True)
+
+    def set_animations_enabled(self, value: bool) -> None:
+        self.set_bool("animations_enabled", value)
+
+    def volume_normalization(self) -> bool:
+        """Whether the visualizer level follows the volume slider.
+
+        The waveform is drawn from the samples the decoder produced *after* the
+        volume was applied, so a quiet slider looks like a quiet track.  With
+        this on the panel compensates for the volume it is told about, which
+        makes the meters a picture of the music rather than of the knob.
+        """
+        return self.get_bool("volume_normalization", False)
+
+    def set_volume_normalization(self, value: bool) -> None:
+        self.set_bool("volume_normalization", value)
 
     def get_theme(self) -> str:
         """The stored theme, or the default if the file names one we do not have.

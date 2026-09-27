@@ -66,7 +66,6 @@ NETWORK_ERROR_MARKERS = (
 )
 REJECTED_TOKEN_MARKERS = (
     "unauthorized",
-    "401",
     "invalid token",
     "invalid-token",
     "incorrect token",
@@ -74,7 +73,8 @@ REJECTED_TOKEN_MARKERS = (
     "expired token",
     "token is invalid",
 )
-FORBIDDEN_MARKERS = ("forbidden", "403", "no rights", "нет прав")
+FORBIDDEN_MARKERS = ("forbidden", "no rights", "нет прав")
+
 
 _PAGE = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8">
@@ -697,17 +697,37 @@ class AuthService(QObject):
 
         ``yandex_music`` raises :class:`UnauthorizedError` for both 401 and 403;
         403 means the account simply lacks the rights, so the token is kept.
+        The bar is deliberately high: every ambiguous error keeps the token,
+        because a token that survives a bad launch costs nothing while a
+        deleted one costs a login.
         """
         from yandex_music.exceptions import UnauthorizedError
 
         lowered = f"{type(exc).__name__} {exc}".lower()
         if any(marker in lowered for marker in FORBIDDEN_MARKERS):
             return False
+        if cls._mentions_status(lowered, "403"):
+            return False
         if isinstance(exc, UnauthorizedError):
             return True
         if cls.is_network_error(exc):
             return False
+        if cls._mentions_status(lowered, "401"):
+            return True
         return any(marker in lowered for marker in REJECTED_TOKEN_MARKERS)
+
+    @staticmethod
+    def _mentions_status(lowered: str, code: str) -> bool:
+        """True when ``code`` appears in ``lowered`` as an HTTP status.
+
+        The digits must directly follow a status word, separated by nothing but
+        punctuation and spaces, so an address, a port or a byte count is not a
+        status.  Without the adjacency rule «RuntimeError: track 401» counted as
+        one, because «error» is a status word and «track» is only seven
+        characters away.
+        """
+        pattern = r"(?:^|[^0-9a-z])(?:http|status|code|error|ответ|код|err)[\s:=]*" + code + r"(?![0-9])"
+        return re.search(pattern, lowered) is not None
 
     @staticmethod
     def _readable_error(exc: Exception) -> str:

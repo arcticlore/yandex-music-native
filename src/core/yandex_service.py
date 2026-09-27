@@ -175,6 +175,30 @@ def _text(value: Any) -> str:
     return str(value).strip() if value else ""
 
 
+def _lyrics_text(descriptor: Any) -> str:
+    """Read the lyric body out of whatever ``tracks_lyrics`` handed back.
+
+    A :class:`yandex_music.TrackLyrics` is a descriptor with a download URL, so
+    the words are a second request; a test double or an older build may return
+    the text directly.  All three shapes are accepted, because the alternative
+    is a drawer that says «нет текста» on a track that has one.
+    """
+    for attribute in ("lyrics", "text"):
+        value = getattr(descriptor, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    if isinstance(descriptor, str):
+        return descriptor
+    fetch = getattr(descriptor, "fetch_lyrics", None) or getattr(descriptor, "fetchLyrics", None)
+    if callable(fetch):
+        try:
+            return _text(fetch())
+        except Exception as exc:  # noqa: BLE001 - any failure means «no text»
+            log.debug("lyrics download failed: %s", exc)
+            return ""
+    return ""
+
+
 def cover_size(size: str | int = DEFAULT_COVER_SIZE) -> str:
     """Resolve a size alias (``large``) to a Yandex size string (``1000x1000``)."""
     if isinstance(size, int):
@@ -686,12 +710,25 @@ def select_variant(
     quality: str = QUALITY_AUTO,
     allow_lossless: bool = True,
 ) -> Any | None:
-    """Pick the best download variant for ``quality``.
+    """Pick the download variant that actually matches ``quality``.
 
-    Lossless variants win when they are allowed and present. For an explicit
-    lossy bitrate the matching variant is used, with a graceful fallback to the
-    best remaining one when the server does not offer that exact bitrate. Preview
-    variants are only selected when nothing else is available.
+    The rule that used to be missing: a request for a lossy bitrate is answered
+    with a lossy variant. Asking for ``320`` and being handed a 1411 kbps FLAC
+    is a 30MB download nobody asked for, and it is what made the setting look
+    broken - the pill said one thing and the stream was another.
+
+    So the two families are searched separately:
+
+    * ``lossless`` - a FLAC variant, else any lossless codec, else 320 kbps.
+      A «без потерь» request that cannot be met falls back to 320 rather than
+      dropping the listener to 192.
+    * ``320`` / ``192`` / ``128`` - that exact bitrate among the lossy
+      variants, preferring MP3, then the closest bitrate below it, then the
+      lowest one above it.
+    * ``auto`` - the best lossless variant when one is allowed, else the best
+      bitrate on offer.
+
+    Preview variants are only used when nothing else is available.
     """
     items = [item for item in (variants or ()) if item is not None]
     if not items:
@@ -700,42 +737,49 @@ def select_variant(
     pool = full or items
     name = _text(quality).lower()
     wanted = QUALITY_ALIASES.get(name, name or QUALITY_AUTO)
+
+    lossless = [item for item in pool if _variant_codec(item) in LOSSLESS_CODECS]
+    lossy = [item for item in pool if _variant_codec(item) not in LOSSLESS_CODECS]
     if not allow_lossless:
-        lossy = [item for item in pool if _variant_codec(item) not in LOSSLESS_CODECS]
         pool = lossy or pool
 
     def best(candidates: list[Any]) -> Any | None:
         return max(candidates, key=_variant_rank) if candidates else None
 
-    def by_bitrate(target: int) -> Any | None:
-        exact = [item for item in pool if _variant_bitrate(item) == target]
+    def by_bitrate(candidates: list[Any], target: int) -> Any | None:
+        if not candidates:
+            return None
+        exact = [item for item in candidates if _variant_bitrate(item) == target]
         if exact:
+            # MP3 first: for the same bitrate it is the codec the label promises.
             return min(exact, key=lambda item: CODEC_RANK.get(_variant_codec(item), 9))
-        below = [item for item in pool if 0 < _variant_bitrate(item) <= target]
+        below = [item for item in candidates if 0 < _variant_bitrate(item) <= target]
         if below:
             return best(below)
-        above = [item for item in pool if _variant_bitrate(item) > target]
+        above = [item for item in candidates if _variant_bitrate(item) > target]
         if above:
             return min(above, key=_variant_bitrate)
-        return best(pool)
+        return best(candidates)
 
     if wanted == QUALITY_LOSSLESS and allow_lossless:
-        lossless = [item for item in pool if _variant_codec(item) in LOSSLESS_CODECS]
+        flac = [item for item in lossless if _variant_codec(item) == "flac"]
+        found = best(flac)
+        if found is not None:
+            return found
         found = best(lossless)
         if found is not None:
             return found
-    elif wanted in QUALITY_BITRATES:
-        return by_bitrate(QUALITY_BITRATES[wanted])
-    else:
-        try:
-            target = int(wanted)
-        except (TypeError, ValueError):
-            target = 0
-        if target > 0:
-            return by_bitrate(target)
-
+        return by_bitrate(lossy, QUALITY_BITRATES[QUALITY_HIGH]) or best(pool)
+    if wanted in QUALITY_BITRATES:
+        target = QUALITY_BITRATES[wanted]
+        return by_bitrate(lossy, target) or by_bitrate(pool, target)
+    try:
+        target = int(wanted)
+    except (TypeError, ValueError):
+        target = 0
+    if target > 0:
+        return by_bitrate(lossy, target) or by_bitrate(pool, target)
     if allow_lossless:
-        lossless = [item for item in pool if _variant_codec(item) in LOSSLESS_CODECS]
         found = best(lossless)
         if found is not None:
             return found
@@ -1935,8 +1979,13 @@ class YandexService(QObject):
 
         return self._submit(_Job("stream_url", call, ok, err))
 
-    def lyrics(self, track: Any = None) -> bool:
-        """Fetch the plain lyrics of ``track`` in the background.
+    def lyrics(self, track: Any = None, synchronized: bool = True) -> bool:
+        """Fetch the lyrics of ``track`` in the background.
+
+        ``synchronized`` asks for the LRC format first, so the drawer can follow
+        the singing.  Not every track has timings, and not every account is
+        offered them, so a miss falls back to the plain text rather than showing
+        an empty drawer: a static lyric is worth having.
 
         The text is deliberately not cached: it is a few kilobytes, it never
         changes, and the caller only ever asks when the drawer is open.
@@ -1951,12 +2000,36 @@ class YandexService(QObject):
         track_id = target.track_id
         self.start()
 
-        def call(client: Any) -> Any:
+        def fetch(client: Any, want_lrc: bool) -> str:
+            """One attempt: the timed format first, the plain text second.
+
+            ``tracks_lyrics`` hands back a descriptor with a download URL, so the
+            text itself is a second request - two calls in total for the format
+            that is wanted, and a third only when the first is empty.
+            """
+            getter = getattr(client, "tracks_lyrics", None) or getattr(client, "tracksLyrics", None)
+            if callable(getter):
+                wanted = "LRC" if want_lrc else "TEXT"
+                try:
+                    descriptor = getter(track_id, format_=wanted)
+                except TypeError:
+                    # Older clients and the snake_case alias take the format
+                    # positionally, or not at all.
+                    descriptor = getter(track_id)
+                if descriptor is not None:
+                    text = _lyrics_text(descriptor)
+                    if text.strip():
+                        return text
             fetched = client.tracks(track_id)
             first = fetched[0] if fetched else None
             if first is None:
                 return ""
             return first.lyrics or ""
+
+        def call(client: Any) -> Any:
+            if not synchronized:
+                return fetch(client, False)
+            return fetch(client, True) or fetch(client, False)
 
         def ok(raw: Any) -> None:
             self.lyrics_ready.emit(track_id, _text(raw))

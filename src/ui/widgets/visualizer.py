@@ -39,6 +39,20 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from ui.theme import ACCENT, BORDER, PANEL, SURFACE, TEXT, WAVE_PINK, on_theme_changed, token
 
 FRAME_INTERVAL_MS = round(1000 / 60)
+MAX_VOLUME_COMPENSATION = 8.0
+"""How far the level compensation may lift a quiet signal.
+
+The tap reads the sink, so the frames arrive *after* mpv applied the volume
+and a low slider really does shrink them.  Undoing that is a division by the
+volume, and at 1% that is a 100x lift of whatever noise floor the stream has.
+The cap keeps the picture honest instead of turning silence into a firework.
+"""
+FULL_SCALE_VOLUME = 100
+"""The volume at which ``volume_compensation`` is a no-op.
+
+Handed to the visualizer when normalisation is on: it asks the stage to divide
+the level back out, and full scale is the level where there is nothing to undo.
+"""
 DEFAULT_BANDS = 64
 WAVE_POINTS = 512
 DEFAULT_ATTACK = 0.62
@@ -501,6 +515,33 @@ def channel_levels(values: Sequence[float], channels: int = 2) -> list[float]:
     return [decibel_to_level(level) for level in levels]
 
 
+def volume_compensation(volume: int) -> float:
+    """The factor that puts a ``volume``-scaled frame back at full scale.
+
+    100% and above needs nothing, 50% doubles, 12% is the cap.  It is a
+    multiplier, not a normaliser: the shape of the frame is preserved, so a
+    quiet passage still looks quiet - only the listener's own knob stops
+    changing what the stage shows.
+    """
+    level = max(0, min(100, int(volume))) / 100.0
+    if level >= 0.999:
+        return 1.0
+    return min(1.0 / max(level, 1.0 / MAX_VOLUME_COMPENSATION), MAX_VOLUME_COMPENSATION)
+
+
+def apply_compensation(values: Sequence[float] | None, factor: float) -> list[float]:
+    """Scale a frame, clamped, so a boosted quiet frame cannot exceed 1.0.
+
+    ``None`` passes straight through: the tap can hand over a frame with
+    nothing in it, and the callers below already know how to treat that.
+    """
+    if values is None:
+        return []
+    if factor == 1.0:
+        return list(values)
+    return [max(-1.0, min(1.0, float(value) * factor)) for value in values]
+
+
 class VisualizerBase(QWidget):
     """Data plumbing plus the 60 FPS repaint clock shared by all styles."""
 
@@ -518,6 +559,8 @@ class VisualizerBase(QWidget):
         self._target_bands: list[float] = [0.0] * bands
         self._target_wave: list[float] = [0.0] * WAVE_POINTS
         self._target_levels: list[float] = [VU_FLOOR] * VU_CHANNELS
+        self._compensation = 1.0
+        self._animations_enabled = True
         self._phase = 0.0
         self._active = False
         self._pending = False
@@ -529,16 +572,26 @@ class VisualizerBase(QWidget):
 
     def set_spectrum(self, values: Sequence[float]) -> None:
         """Feed an FFT frame; rendering happens on the next clock tick."""
-        self._target_bands = fit_bands(values, self._spectrum.size)
+        self._target_bands = fit_bands(apply_compensation(values, self._compensation), self._spectrum.size)
         self._active = True
         self._pending = True
 
     def set_waveform(self, values: Sequence[float]) -> None:
         """Feed a time-domain frame."""
-        self._target_wave = fit_wave(values, self._wave.size)
-        self._target_levels = channel_levels(values, VU_CHANNELS)
+        scaled = apply_compensation(values, self._compensation)
+        self._target_wave = fit_wave(scaled, self._wave.size)
+        self._target_levels = channel_levels(scaled, VU_CHANNELS)
         self._active = True
         self._pending = True
+
+    def set_compensation(self, factor: float) -> float:
+        """Set the factor that undoes the listener's volume, or 1.0 for none.
+
+        Kept as a plain factor rather than a percentage so the stack can hand
+        over :func:`volume_compensation` and the maths stays in one place.
+        """
+        self._compensation = max(1.0, float(factor))
+        return self._compensation
 
     def set_idle(self) -> None:
         """No audio is playing: decay and breathe instead of freezing."""
@@ -595,11 +648,34 @@ class VisualizerBase(QWidget):
     # -- clock --------------------------------------------------------
 
     def start(self) -> None:
-        if not self._timer.isActive():
+        if self._animations_enabled and not self._timer.isActive():
             self._timer.start()
 
     def stop(self) -> None:
         self._timer.stop()
+
+    @property
+    def animations_enabled(self) -> bool:
+        return self._animations_enabled
+
+    def set_animations_enabled(self, enabled: bool) -> bool:
+        """Hold the repaint clock while animations are off.
+
+        The frames still arrive from the tap; they are simply not drawn, which
+        is the whole saving - a 60 FPS clock repainting an unchanged picture is
+        what a quiet machine cannot afford.  Turning the switch back on resumes
+        at once rather than waiting for the next track.
+        """
+        enabled = bool(enabled)
+        if enabled == self._animations_enabled:
+            return enabled
+        self._animations_enabled = enabled
+        if enabled:
+            if self.isVisible():
+                self.start()
+        else:
+            self.stop()
+        return enabled
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -1037,6 +1113,19 @@ class VisualizerStack(QWidget):
     def set_waveform(self, values: Sequence[float]) -> None:
         self.current.set_waveform(values)
 
+    def set_volume(self, volume: int) -> float:
+        """Tell every style what the volume is, so the picture survives it.
+
+        The stage is a picture of the music, not of the knob: at 20% it should
+        look the same as at 100%, otherwise «turn it down a bit» is a visible
+        change of scene.  All styles are told, not just the visible one, so
+        switching modes mid-song does not reveal a dimmer stage.
+        """
+        factor = volume_compensation(volume)
+        for widget in self._visualizers.values():
+            widget.set_compensation(factor)
+        return factor
+
     def set_idle(self) -> None:
         for widget in self._visualizers.values():
             widget.set_idle()
@@ -1049,6 +1138,17 @@ class VisualizerStack(QWidget):
     def reset_data(self) -> None:
         for widget in self._visualizers.values():
             widget.reset_data()
+
+    def set_animations_enabled(self, enabled: bool) -> bool:
+        """Tell every style, so switching modes never reveals a stopped clock."""
+        enabled = bool(enabled)
+        for widget in self._visualizers.values():
+            widget.set_animations_enabled(enabled)
+        return enabled
+
+    @property
+    def animations_enabled(self) -> bool:
+        return self.current.animations_enabled
 
     def stop_all(self) -> None:
         """Stop every clock, including the hidden ones, for a clean exit."""
@@ -1067,12 +1167,15 @@ __all__ = [
     "DEFAULT_PEAK_FALL",
     "DEFAULT_RELEASE",
     "FRAME_INTERVAL_MS",
+    "FULL_SCALE_VOLUME",
     "LevelFollower",
     "MODE_ORDER",
     "MetersVisualizer",
     "RadialVisualizer",
     "Smoother",
+    "apply_compensation",
     "VISUALIZERS",
+    "volume_compensation",
     "VU_CHANNELS",
     "VU_DECIBELS",
     "VisualizerBase",

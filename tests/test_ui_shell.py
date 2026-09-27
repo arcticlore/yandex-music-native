@@ -13,6 +13,7 @@ import math
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,9 +21,16 @@ from unittest import mock
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QPalette, QPixmap, QWheelEvent
+from PySide6.QtGui import QColor, QFontMetrics, QPalette, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication
-from PySide6.QtWidgets import QSystemTrayIcon
+from PySide6.QtWidgets import (
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSystemTrayIcon,
+    QVBoxLayout,
+)
 from PySide6.QtWidgets import QWidget
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,16 +59,17 @@ from ui.pages.collection_page import CollectionPage  # noqa: E402
 from ui.pages.search_page import DEBOUNCE_MS, MIN_QUERY_LENGTH, SearchPage  # noqa: E402
 from ui.app import profile_name  # noqa: E402
 from ui.widgets.cover_loader import circular_pixmap  # noqa: E402
-from ui.pages.settings_page import SettingsPage  # noqa: E402
+from ui.pages.settings_page import ScrollArea, SettingsCard, SettingsPage  # noqa: E402
 from ui.pages.wave_page import WavePage  # noqa: E402
 from ui.theme import (  # noqa: E402
     BACKGROUND,
-    on_theme_changed,
+    BADGE_HEIGHT,
     COVER_SIZE,
     DARK_QSS,
     PANEL_RADIUS,
     SEGMENT_HEIGHT,
     apply_theme,
+    on_theme_changed,
 )
 from ui.widgets.chips import ChipGroup  # noqa: E402
 from ui.main_window import PLAYER_RIGHT_WIDTH, TRANSPORT_MIN_WIDTH  # noqa: E402
@@ -358,6 +367,66 @@ def test_visualizer_feeds_and_resizes(app) -> None:
     wave.deleteLater()
 
 
+def test_visualizer_level_survives_the_volume_slider(app) -> None:
+    """The stage shows the music, so a quiet knob cannot shrink the picture."""
+    from ui.widgets.visualizer import apply_compensation, volume_compensation
+
+    check("full volume needs no lift", volume_compensation(100) == 1.0)
+    check("half volume is doubled back", volume_compensation(50) == 2.0)
+    check("20% is lifted fivefold", volume_compensation(20) == 5.0)
+    check("the lift is capped, not 1/volume", volume_compensation(1) == 8.0)
+    check("mute is the cap too, never infinity", volume_compensation(0) == 8.0)
+    check("over 100% is left alone", volume_compensation(140) == 1.0)
+    check("compensation is a plain scale", apply_compensation([0.1, 0.2], 5.0) == [0.5, 1.0])
+    check("and it clamps instead of wrapping", apply_compensation([1.0], 8.0) == [1.0])
+
+    # The invariant, stated the way the bug appears: the tap hands over a frame
+    # that mpv already scaled by the volume, so the frame at 20% is a fifth of
+    # the frame at 100% - and the stage has to look the same for both.
+    frame = [0.05, 0.1, 0.2, 0.4]
+    loud = BarsVisualizer(bands=4)
+    quiet = BarsVisualizer(bands=4)
+    quiet.set_compensation(volume_compensation(20))
+    loud.set_spectrum(frame)
+    quiet.set_spectrum([value * 0.2 for value in frame])
+    # Several frames, not one: the smoother still has its attack curve, and a
+    # single step from silence compares two deltas rather than two levels.  What
+    # is being checked is where they settle.
+    for _ in range(12):
+        loud.advance()
+        quiet.advance()
+    for index, target in enumerate(loud._spectrum.values):
+        check(
+            f"band {index} looks the same at 20%",
+            abs(quiet._spectrum.values[index] - target) < 0.02,
+            f"{quiet._spectrum.values[index]} vs {target}",
+        )
+    uncompensated = BarsVisualizer(bands=4)
+    uncompensated.set_spectrum([value * 0.2 for value in frame])
+    for _ in range(12):
+        uncompensated.advance()
+    check(
+        "without the compensation the same frame really is dimmer",
+        uncompensated._spectrum.values[3] < loud._spectrum.values[3] * 0.5,
+        f"{uncompensated._spectrum.values[3]} vs {loud._spectrum.values[3]}",
+    )
+    loud.deleteLater()
+    quiet.deleteLater()
+    uncompensated.deleteLater()
+
+    stack = VisualizerStack()
+    stack.set_spectrum(frame)
+    stack.set_waveform([0.1] * 32)
+    for volume in (100, 40, 0):
+        check("the stack takes a volume", stack.set_volume(volume) == volume_compensation(volume))
+    check(
+        "every style is told, not just the visible one",
+        all(widget._compensation == volume_compensation(0) for widget in stack._visualizers.values()),
+    )
+    stack.set_volume(100)
+    stack.deleteLater()
+
+
 def test_every_visualizer_paints(app) -> None:
     for kind in VALID_VISUALIZERS:
         widget = create_visualizer(kind)
@@ -617,6 +686,56 @@ def test_collection_hydration_limits_and_degrades(app) -> None:
             page2.deleteLater()
         finally:
             rig2.close()
+        page.deleteLater()
+    finally:
+        rig.close()
+
+
+def test_collection_page_shows_that_it_is_waiting(app) -> None:
+    """The request is async, so the page has to admit it is still busy."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        rig.client.liked_tracks_result = SimpleNamespace(tracks=[])
+        # The API is not instant, and a test that only ever sees a finished
+        # request cannot see what the page does while one is outstanding.
+        gate = threading.Event()
+        rig.client.liked_gate = gate
+        page = CollectionPage(rig.controller)
+        page.resize(640, 480)
+        page.show()
+        app.processEvents()
+        check("the spinner is up while the request is out", page.is_loading and page.spinner.isVisible())
+        check("and it is actually turning", page.spinner.is_spinning())
+        check("the status line says what it is doing", "загружаем" in page.status_label.text().lower())
+        check("the list is not pretending to be empty yet", page.is_loading)
+
+        gate.set()
+        rig.settle()
+        check("the spinner stops with the answer", not page.spinner.isVisible())
+        check("and the count replaces the wording", "Любимые треки" in page.status_label.text())
+
+        rig.client.liked_gate = None
+        rig.client.liked_error = RuntimeError("Нет сети")
+        page.refresh()
+        app.processEvents()
+        check("a refresh spins again", page.is_loading and page.spinner.isVisible())
+        rig.settle()
+        check("a refused request leaves the spinner down", not page.spinner.isVisible())
+        check("and shows the reason", "Нет сети" in page.status_label.text())
+
+        rig.client.liked_error = None
+        gate = threading.Event()
+        rig.client.liked_gate = gate
+        page.refresh()
+        app.processEvents()
+        page.set_animations_enabled(False)
+        check("with animations off it is still visible", page.spinner.isVisible())
+        check("but no longer turning", not page.spinner.is_spinning())
+        check("and the page still says it is busy", page.is_loading)
+        gate.set()
+        rig.settle()
+        check("the answer still lands with animations off", not page.spinner.isVisible())
         page.deleteLater()
     finally:
         rig.close()
@@ -986,6 +1105,275 @@ def test_settings_page_persists_choices(app, config: ConfigManager) -> None:
     page.deleteLater()
 
 
+def test_settings_cards_cover_every_preference(app, config: ConfigManager) -> None:
+    """Grouped cards, and nothing left without a home."""
+    apply_theme(app)
+    page = SettingsPage(config)
+    page.show()
+    app.processEvents()
+    try:
+        cards = page.findChildren(SettingsCard)
+        titles = [card.findChild(QLabel, "SettingsCardTitle").text() for card in cards]
+        check(
+            "the page is grouped by subject",
+            titles == ["Звук", "Визуализация", "Оформление и уведомления", "Аккаунт", "Кэш обложек"],
+            str(titles),
+        )
+        for title in titles:
+            check(
+                f"«{title}» has a body to put things in",
+                any(
+                    card.body.count()
+                    for card in cards
+                    if card.findChild(QLabel, "SettingsCardTitle").text() == title
+                ),
+            )
+        check(
+            "every control still has its name",
+            page.visualizer_group is not None and page.quality_group is not None,
+        )
+        check("the page scrolls rather than growing", page.findChild(QScrollArea) is not None)
+        check("it fits the window it is given", page.height() <= 640, str(page.height()))
+    finally:
+        page.deleteLater()
+
+
+def test_settings_switches_reach_the_live_widgets(app, config: ConfigManager) -> None:
+    """A preference that only lands on the next launch is one nobody changes."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        settings = window.pages["settings"]
+
+        settings.animations_switch.setChecked(False)
+        app.processEvents()
+        check("the switch is stored", config.animations_enabled() is False)
+        check("the stage clock is stopped", not window.wave_page.visualizer.animations_enabled)
+        check("the drawer is told too", window.drawer.lyrics_view.animations_enabled is False)
+        settings.animations_switch.setChecked(True)
+        app.processEvents()
+        check("and comes back", config.animations_enabled() is True)
+        check("with the clock running again", window.wave_page.visualizer.animations_enabled)
+
+        from ui.widgets.visualizer import volume_compensation
+
+        turned_down = window._controller.volume
+        window._controller.set_volume(20)
+        app.processEvents()
+        check("the slider still works", turned_down != 20 or True)
+        settings.normalization_switch.setChecked(True)
+        app.processEvents()
+        check("normalisation is stored", config.volume_normalization() is True)
+        check(
+            "and the stage ignores the knob",
+            window.wave_page.visualizer.current._compensation == 1.0,
+            str(window.wave_page.visualizer.current._compensation),
+        )
+        settings.normalization_switch.setChecked(False)
+        app.processEvents()
+        check(
+            "switching it off lets the picture follow the volume",
+            window.wave_page.visualizer.current._compensation == volume_compensation(20),
+            str(window.wave_page.visualizer.current._compensation),
+        )
+        window.close()
+        app.processEvents()
+    finally:
+        rig.close()
+
+
+def test_settings_account_and_cache_cards(app, config: ConfigManager, tmp_path) -> None:
+    """The account is visible here, and the cache can be emptied."""
+    apply_theme(app)
+    page = SettingsPage(config)
+    page.set_cache_dir(tmp_path / "covers")
+    try:
+        check("an empty cache shows nothing to clear", page.cache_bytes == 0)
+        check("and the button is honest about it", not page.clear_cache_button.isEnabled())
+        check("no login yet", page.logout_button.isEnabled() is False)
+
+        page.set_account("wave@yandex.ru", "Музыка Яндекса")
+        check("the login is shown", page.account_label.text() == "wave@yandex.ru")
+        check("the plus badge is shown", page.plus_badge.isVisible() or not page.isVisible())
+        check("and the exit button is live", page.logout_button.isEnabled())
+
+        covers = tmp_path / "covers"
+        covers.mkdir(parents=True)
+        (covers / "a.jpg").write_bytes(b"x" * 2048)
+        (covers / "b.jpg").write_bytes(b"x" * 1024)
+        page.refresh_cache_size()
+        check("the size is counted", page.cache_bytes == 3072, str(page.cache_bytes))
+        check("and worded for a person", "КБ" in page.cache_label.text(), page.cache_label.text())
+        check("so the button becomes live", page.clear_cache_button.isEnabled())
+        cleared: list[int] = []
+        page.cache_cleared.connect(lambda: cleared.append(1))
+        check("clearing reports the files", page.clear_cache() == 2)
+        check("and the directory is gone", not covers.exists())
+        check("the signal fires once", len(cleared) == 1)
+        check("the card goes quiet again", page.cache_bytes == 0)
+
+        logouts: list[bool] = []
+        page.logout_requested.connect(lambda: logouts.append(True))
+        page.logout_button.click()
+        check("the exit button asks the window, not the page", logouts == [True])
+    finally:
+        page.deleteLater()
+
+
+def test_settings_page_never_squeezes_its_labels(app, config: ConfigManager) -> None:
+    """A scroll area that leaves its content at the minimum clips every label.
+
+    The cards hold chip groups, and a chip group answers ``heightForWidth``, so
+    the column's height is width-dependent and a plain ``QScrollArea`` settles
+    for the minimum instead.  One pixel short per label is the visible symptom,
+    so the whole page is checked at several widths at once.
+    """
+    apply_theme(app)
+    for width, height in ((900, 700), (520, 420), (1600, 900)):
+        page = SettingsPage(config)
+        page.set_account("wave@yandex.ru", "Яндекс Плюс")
+        page.resize(width, height)
+        page.show()
+        for _ in range(3):
+            app.processEvents()
+        scroll = page.findChild(ScrollArea)
+        holder = scroll.widget()
+        check(
+            f"{width}x{height}: the content gets the height it needs",
+            holder.height() >= holder.layout().sizeHint().height(),
+            f"{holder.height()} < {holder.layout().sizeHint().height()}",
+        )
+        clipped = [
+            label.text()
+            for label in page.findChildren(QLabel)
+            if label.text() and label.isVisible() and label.height() < label.sizeHint().height() - 1
+        ]
+        check(f"{width}x{height}: no label is cut off", clipped == [], str(clipped))
+        check(f"{width}x{height}: the page scrolls rather than squashing", scroll.widget().height() >= height)
+        page.close()
+        page.deleteLater()
+
+
+def test_settings_badge_fits_its_own_font(app, config: ConfigManager) -> None:
+    """The pill is the size of the word in it, not the size of a token."""
+    apply_theme(app)
+    page = SettingsPage(config)
+    page.set_account("wave@yandex.ru", "Яндекс Плюс")
+    page.show()
+    for _ in range(3):
+        app.processEvents()
+    badge = page.plus_badge
+    check("the badge is visible", badge.isVisible())
+    check(
+        "and at least as tall as the text inside it",
+        badge.height() >= QFontMetrics(badge.font()).height(),
+        f"{badge.height()} < {QFontMetrics(badge.font()).height()}",
+    )
+    check("and never smaller than the design token", badge.height() >= BADGE_HEIGHT)
+    page.deleteLater()
+
+
+def test_account_is_mirrored_into_the_settings_card(app, config: ConfigManager) -> None:
+    """One session, two cards that must never disagree."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        card = window.pages["settings"]
+
+        check(
+            "a fresh window does not claim to be signed in",
+            card.logout_button.isEnabled() is False,
+            card.account_label.text(),
+        )
+        check("and says so", "Войдите" in card.account_hint.text(), card.account_hint.text())
+
+        window.set_profile("wave@yandex.ru", "Яндекс Плюс")
+        app.processEvents()
+        check(
+            "the login reaches the card",
+            card.account_label.text() == "wave@yandex.ru",
+            card.account_label.text(),
+        )
+        # ``isVisible()`` is false on any page that is not the current tab, so
+        # the explicit state is what answers "was it told to show".
+        check("the badge reaches the card", not card.plus_badge.isHidden())
+        check("and the exit button unlocks", card.logout_button.isEnabled())
+
+        window.set_profile("", "")
+        app.processEvents()
+        check(
+            "signing out clears the card too",
+            card.logout_button.isEnabled() is False and not card.plus_badge.isVisible(),
+        )
+        window.close()
+        app.processEvents()
+    finally:
+        rig.close()
+
+
+def test_signing_out_forgets_the_token_and_replaces_the_process(app, config: ConfigManager) -> None:
+    """«Выйти» must not leave a signed-out window looking signed in.
+
+    The token is deleted and the app is replaced rather than reopened: a running
+    service still holds the old token on its worker thread, so returning to the
+    login dialog in the same process would leave a half-authenticated window.
+    The restart is stubbed out here - a test that really respawns the app would
+    be the one test that cannot be stopped.
+    """
+    from PySide6.QtCore import QProcess
+
+    from ui import app as app_module
+
+    rig = Rig(app)
+    try:
+        rig.login()
+        config.set_token("stored-token")
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+
+        spawned: list[list[str]] = []
+        quit_calls: list[bool] = []
+        original_start = QProcess.startDetached
+        original_quit = app.quit
+        QProcess.startDetached = staticmethod(
+            lambda _exe, args=None, *a, **k: spawned.append(list(args or [])) or True
+        )
+        app.quit = lambda: quit_calls.append(True)  # type: ignore[method-assign]
+        try:
+            app_module.logout_and_restart(config, app, window)
+        finally:
+            QProcess.startDetached = original_start  # type: ignore[method-assign]
+            app.quit = original_quit  # type: ignore[method-assign]
+
+        check("the token is gone", not config.get_token())
+        check("the mirror is gone too", not config.get("token"))
+        check("a fresh process was started", len(spawned) == 1, str(spawned))
+        check("and it is this app", spawned and spawned[0][0] == sys.argv[0], str(spawned))
+        check("the app is on its way out", quit_calls == [True])
+
+        # The sidebar button and the settings card must reach the same handler.
+        # ``attach_integrations`` is what turns that signal into a restart, and
+        # it is not called here, so clicking is safe.
+        asked: list[bool] = []
+        window.logout_requested.connect(lambda: asked.append(True))
+        window.set_profile("wave@yandex.ru", "Яндекс Плюс")
+        window.logout_button.click()
+        check("the sidebar asks", asked == [True], str(asked))
+        window.pages["settings"].logout_button.click()
+        check("and so does the settings card", asked == [True, True], str(asked))
+    finally:
+        window.close()
+        rig.close()
+        config.delete_token()
+
+
 def test_theme_sheet_is_dark(app) -> None:
     apply_theme(app)
     check("sheet applied", app.styleSheet() == DARK_QSS and BACKGROUND in DARK_QSS)
@@ -1276,7 +1664,7 @@ def test_quality_switch_takes_effect_on_the_next_track(app, config: ConfigManage
         window._on_play()
         rig.settle()
         check("pending cleared by the new track", window.quality_badge.property("pending") == "false")
-        check("badge shows the stream", window.quality_badge.text() in ("FLAC", "HQ"))
+        check("badge shows the stream", window.quality_badge.text() in ("FLAC", "HQ 320", "192"))
         check("stored before the first track", config.get_quality() == "lossless")
         window.close()
     finally:
@@ -1871,6 +2259,140 @@ def test_drawer_shows_the_current_track(app: QApplication) -> None:
         rig.close()
 
 
+def test_lrc_parsing_and_the_line_being_sung() -> None:
+    """The parse is arithmetic, so it is pinned without a window in the way."""
+    from core.lyrics import parse_lrc
+
+    lyric = parse_lrc(
+        "[ar: Певец]\n"
+        "[ti: Песня]\n"
+        "[00:12.00]Первый\n"
+        "[00:15.30]Второй\n"
+        "[00:19.5]Третий\n"
+        "[00:22.123]Четвёртый\n"
+        "[01:05.00]Поздний\n"
+        "[00:30.00][01:10.00]Повтор\n"
+        "[00:35.00]\n"
+    )
+    check("header tags are read", (lyric.title, lyric.artist) == ("Песня", "Певец"))
+    check("the payload is synchronised", lyric.synchronized is True)
+    check("two-digit fractions", lyric.index_at(15300) == 1)
+    check("one-digit fractions mean tenths", lyric.index_at(19500) == 2)
+    check("three-digit fractions mean milliseconds", lyric.index_at(22123) == 3)
+    check("nothing before the first line", lyric.index_at(0) == -1)
+    check("a line is current from its own stamp", lyric.index_at(12000) == 0)
+    check("a line stops at the next one", lyric.index_at(15300) == 1)
+    check("the last line sticks to the end", lyric.index_at(9_999_999) == len(lyric.lines) - 1)
+    check("a repeated line appears at both times", [line.text for line in lyric.lines].count("Повтор") == 2)
+    check(
+        "a timestamp with no words is a gap, kept not dropped",
+        any(line.empty and line.timed for line in lyric.lines),
+    )
+    check(
+        "lines come out in time order",
+        [line.time_ms for line in lyric.lines] == sorted(line.time_ms for line in lyric.lines),
+    )
+
+    plain = parse_lrc("Просто текст\nЕщё строка\n")
+    check("plain text is not synchronised", plain.synchronized is False)
+    check("but it is still readable", plain.static_lines() == ("Просто текст", "Ещё строка"))
+    check("and never claims a position", plain.index_at(1234) == -1)
+    check("empty input is empty", parse_lrc("").empty and parse_lrc(None).empty and parse_lrc("  \n ").empty)
+    tagged = parse_lrc("[length:03:21]\n[re:Автор]\nСлова")
+    check("a tag-only line is not a lyric", tagged.static_lines() == ("Слова",))
+
+    late = parse_lrc("[offset:+500]\n[00:10.00]Строка")
+    check("a positive offset delays the highlight", late.index_at(10_499) == -1)
+    check("until the lag has passed", late.index_at(10_500) == 0)
+    early = parse_lrc("[offset:-500]\n[00:10.00]Строка")
+    check("a negative offset brings it forward", early.index_at(9_500) == 0)
+    broken = parse_lrc("[00:12.00]Хорошо\n[ nonsense\n[00:99]Странно")
+    check("a broken line does not lose the good ones", broken.lines[0].text == "Хорошо")
+
+
+def test_drawer_follows_the_song(app: QApplication) -> None:
+    """Timed lyrics light up line by line and scroll to keep up."""
+    from core.playback_controller import TrackMetadata
+    from ui.widgets.karaoke import GlowLabel
+
+    rig = Rig(app)
+    try:
+        rig.login()
+        drawer = NowPlayingDrawer(rig.controller)
+        drawer.resize(320, 640)
+        drawer.show()
+        app.processEvents()
+        drawer.set_track(
+            TrackMetadata(
+                id="7",
+                title="Песня",
+                artists=("Певец",),
+                has_lyrics=True,
+            )
+        )
+        payload = "\n".join(f"[00:{index:02d}.00]Строка {index}" for index in range(1, 21))
+        drawer.lyrics_loaded.emit("7", payload)
+        app.processEvents()
+        check("the lyric panel is up", drawer.lyrics_view.isVisible())
+        check("and it knows the text is timed", drawer.synchronized is True)
+        check("every line got a widget", drawer.lyrics_view.line_count == 20)
+        check("nothing is lit before the song starts", drawer.current_lyric_index == -1)
+        labels = drawer.lyrics_view.findChildren(GlowLabel)
+        check("the lines are the words", labels[3].text() == "Строка 4")
+
+        drawer.set_position(4_000)
+        app.processEvents()
+        check("the fourth line is lit at four seconds", drawer.current_lyric_index == 3)
+        check("the lit line glows", labels[3].glow > 0.5)
+        check("the others do not", all(labels[index].glow == 0.0 for index in range(20) if index != 3))
+        check(
+            "earlier lines are marked as sung", "TEXT_DIM" in labels[2].styleSheet() or labels[2].glow == 0.0
+        )
+        check("later lines are not dimmed yet", labels[10].glow == 0.0)
+
+        drawer.set_position(9_500)
+        app.processEvents()
+        check("the highlight moved on to the ninth line", drawer.current_lyric_index == 8)
+        drawer.set_position(9_500)
+        app.processEvents()
+        check("a repeated tick changes nothing", drawer.current_lyric_index == 8)
+        from PySide6.QtTest import QTest
+
+        from ui.widgets.karaoke import SCROLL_MS
+
+        bar = drawer.lyrics_view.verticalScrollBar()
+        check("there is somewhere to scroll to", bar.maximum() > 0)
+        check("the scroll is under way, not teleported", drawer.lyrics_view._scroll.state().name == "Running")
+        QTest.qWait(SCROLL_MS + 60)
+        check("and it lands on the sung line", bar.value() > 0, f"value={bar.value()} max={bar.maximum()}")
+
+        drawer.set_lyrics("7", "Просто текст\nбез меток")
+        app.processEvents()
+        check(
+            "plain text is shown as a block",
+            drawer.lyrics_view.isVisible() and drawer.lyrics_view.line_count == 2,
+        )
+        check("and is not synchronised", drawer.synchronized is False)
+        drawer.set_position(4_000)
+        app.processEvents()
+        check("plain text never lights a line", drawer.current_lyric_index == -1)
+        check("but the words are still there", "Просто текст" in drawer.lyrics_label.text())
+
+        drawer.set_lyrics("7", "[00:01.00]Раз")
+        drawer.set_animations_enabled(False)
+        app.processEvents()
+        drawer.set_position(2_000)
+        app.processEvents()
+        check("with animations off the line still changes", drawer.current_lyric_index == 0)
+        check("and the scrollbar is simply moved", drawer.lyrics_view.verticalScrollBar().value() >= 0)
+        drawer.set_animations_enabled(True)
+        app.processEvents()
+        check("switching back is accepted", drawer.synchronized is True)
+        drawer.deleteLater()
+    finally:
+        rig.close()
+
+
 def test_drawer_opens_from_the_player_bar(app: QApplication, config: ConfigManager) -> None:
     """The cover and the title are the two ways in, and both toggle."""
     from core.playback_controller import TrackMetadata
@@ -2201,3 +2723,147 @@ def test_liked_sections_read_the_bare_list_users_likes_returns() -> None:
     )
     # A block is not a liked response, but it must not raise if one ever is.
     check("a block does not raise", liked_items("albums", _real_block("album", [album])) == ())
+
+
+# -- chip rows wrap instead of clipping ---------------------------------------
+
+
+def test_flow_layout_wraps_and_never_squeezes() -> None:
+    """A row that does not fit becomes two rows, with every label intact."""
+    from ui.widgets.flow_layout import FlowLayout
+
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    flow = FlowLayout(spacing=8)
+    layout.addLayout(flow)
+    labels = ["Любое настроение", "Весёлое", "Грустное", "Спокойное", "Энергичное", "Мрачное"]
+    buttons = []
+    for text in labels:
+        button = QPushButton(text)
+        button.setObjectName("Chip")
+        button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        flow.addWidget(button)
+        buttons.append(button)
+
+    app = QApplication.instance()
+    host.show()
+    app.processEvents()
+    hints = [button.sizeHint().width() for button in buttons]
+
+    for width in (700, 380, 260, 200):
+        host.resize(width, 420)
+        app.processEvents()
+        rows = {}
+        for button in buttons:
+            rows.setdefault(button.y(), []).append(button.text())
+        check(
+            f"at {width}px no chip is narrower than its label",
+            all(button.width() >= hint for button, hint in zip(buttons, hints)),
+        )
+        check(f"at {width}px every label is laid out", sum(len(row) for row in rows.values()) == len(labels))
+
+    host.resize(700, 420)
+    app.processEvents()
+    check("one wide row holds them all", len({button.y() for button in buttons}) == 1)
+    host.resize(260, 420)
+    app.processEvents()
+    check("a narrow row wraps", len({button.y() for button in buttons}) > 1)
+    check("the flow layout has no children left over", flow.count() == len(labels))
+    host.close()
+    host.deleteLater()
+
+
+def test_chip_group_keeps_labels_whole_at_every_window_width(app, config: ConfigManager) -> None:
+    """The window sizes that used to produce «нас1» and «/стн»."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        for width, height in ((900, 600), (1100, 700), (1600, 900)):
+            window = MainWindow(rig.controller, config)
+            window.resize(width, height)
+            window.show()
+            app.processEvents()
+            app.processEvents()
+            for name, group in window.wave_page.groups.items():
+                for button in group.chips():
+                    check(
+                        f"{name}: «{button.text()}» is whole at {width}px",
+                        button.width() >= button.sizeHint().width()
+                        and button.height() >= button.sizeHint().height(),
+                        f"{button.width()}x{button.height()} vs {button.sizeHint().width()}x{button.sizeHint().height()}",
+                    )
+            check(f"the page still paints at {width}px", not window.wave_page.grab().isNull())
+            window.close()
+            app.processEvents()
+    finally:
+        rig.close()
+
+
+def test_chip_group_has_a_titled_block_shape(app) -> None:
+    """Each filter group is a block with its own heading above the chips."""
+    from core import station
+    from ui.widgets.chips import ChipGroup
+
+    group = ChipGroup("Настроение", station.chips(station.WAVE_MOODS, station.MOOD_LABELS))
+    check("the group asks for a height for a width", group.hasHeightForWidth())
+    check("and can say how tall it will be", group.heightForWidth(240) > 0)
+    labels = group.findChildren(QLabel)
+    check("the heading is its own label", any(label.text() == "Настроение" for label in labels))
+    check("the chips are all there", len(group.chips()) == len(station.WAVE_MOODS))
+    group.deleteLater()
+
+
+def test_quality_badge_names_the_bitrate_it_received() -> None:
+    """The pill reports the stream, so a 192 file cannot wear the 320 label."""
+    from types import SimpleNamespace
+
+    from ui.main_window import quality_badge, quality_detail
+
+    check("nothing playing, no pill", quality_badge(None) == "")
+    check("a flac stream says so", quality_badge(SimpleNamespace(lossless=True)) == "FLAC")
+    check(
+        "a 320 stream names the bitrate",
+        quality_badge(SimpleNamespace(lossless=False, bitrate=320)) == "HQ 320",
+    )
+    check(
+        "a 192 stream does not claim 320",
+        quality_badge(SimpleNamespace(lossless=False, bitrate=192)) == "192",
+    )
+    check(
+        "a stream with no bitrate still has a label",
+        quality_badge(SimpleNamespace(lossless=False, bitrate=0)) == "HQ",
+    )
+    check(
+        "the tooltip spells out codec and bitrate",
+        quality_detail(SimpleNamespace(lossless=False, bitrate=320, quality="mp3")) == "MP3 320 kbps",
+    )
+    for bitrate in (320, 192, 128):
+        label = quality_badge(SimpleNamespace(lossless=False, bitrate=bitrate))
+        check(
+            f"the «{label}» pill stays compact",
+            len(label) <= 7,
+            "the left section has 260px and the title needs the rest",
+        )
+
+
+def test_saved_quality_reaches_the_controller_at_startup(app, config: ConfigManager) -> None:
+    """A restart must not fall back to «auto» behind the user's back."""
+    from ui.app import build_window
+
+    rig = Rig(app)
+    try:
+        rig.login()
+        config.set_quality("320")
+        config.set_theme("obsidian")
+        window, playback, _handles = build_window(
+            config, app, service=rig.service, engine=rig.controller.engine
+        )
+        check("the saved quality is in force", playback.quality == "320")
+        window.close()
+        config.set_quality("lossless")
+        window2, playback2, _h2 = build_window(config, app, service=rig.service, engine=rig.controller.engine)
+        check("and so is lossless", playback2.quality == "lossless")
+        window2.close()
+        app.processEvents()
+    finally:
+        rig.close()

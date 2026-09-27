@@ -306,6 +306,21 @@ QFrame#ProfileCard {
     border: 1px solid <<BORDER>>;
     border-radius: <<PANEL_RADIUS>>px;
 }
+/* A settings card is a subject, not a decoration: one surface, one border, and
+   a heading that is louder than anything inside it. The left accent is the only
+   thing that carries the accent colour, so the page does not turn into a row of
+   coloured boxes. */
+QFrame#SettingsCard {
+    background: <<SURFACE>>;
+    border: 1px solid <<BORDER>>;
+    border-left: 2px solid <<ACCENT>>;
+    border-radius: <<PANEL_RADIUS>>px;
+}
+QLabel#SettingsCardTitle {
+    color: <<TEXT>>;
+    font-size: 15px;
+    font-weight: 600;
+}
 QLabel#ProfileAvatar {
     background: <<SURFACE_HOVER>>;
     border-radius: <<RADIUS_LIST_COVER>>px;
@@ -547,12 +562,16 @@ QPushButton#Accent:disabled, QPushButton#Primary:disabled {
     background: <<SURFACE_HOVER>>;
     color: <<TEXT_MUTED>>;
 }
+/* 6px of vertical padding around a 20px line of text is the 32px chip; the
+   14px sides are what keeps a word like «Спокойное» from touching its border.
+   min-width is deliberately absent: a chip is as wide as its label, and the
+   FlowLayout above wraps a row that does not fit instead of clipping it. */
 QPushButton#Chip {
     background: <<CHIP_BG>>;
     border: 1px solid <<CHIP_BORDER>>;
     border-radius: <<CHIP_RADIUS>>px;
     min-height: <<CHIP_BOX>>px;
-    padding: 0 <<SPACE_LG>>px;
+    padding: 6px 14px;
     color: <<CHIP_INK>>;
     font-size: 13px;
     font-weight: 500;
