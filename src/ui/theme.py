@@ -142,6 +142,14 @@ ROW_HOVER = _alpha(TEXT, 0.04)
 """A pointer over a row lifts it by four percent of white, nothing more."""
 
 LIKE_GLOW = _alpha(LIKE_ACTIVE, 0.22)
+DISLIKE_GLOW = _alpha(DANGER, 0.22)
+"""The wash behind a disliked track.
+
+Derived from ``DANGER`` rather than from ``LIKE_ACTIVE``: a dislike and a like
+are both «the user has an opinion about this track», and two buttons glowing in
+the same pink side by side would say nothing about which is which.  The shape
+carries that - a whole heart against a broken one.
+"""
 WAVE_BG = _alpha(WAVE_VIOLET, 0.16)
 WAVE_BORDER = _alpha(WAVE_VIOLET, 0.55)
 GROOVE = _alpha(TEXT, 0.10)
@@ -387,7 +395,7 @@ QLabel#TimeLabel {
    over setFixedSize, so every square icon button spells out its own 36x36. The
    two bordered pills lose 2px, because their 1px frame sits outside the size. */
 QPushButton#TransportButton, QPushButton#ShuffleButton, QPushButton#RepeatButton,
-QPushButton#ModeButton, QPushButton#LikeButton {
+QPushButton#ModeButton, QPushButton#LikeButton, QPushButton#DislikeButton {
     min-width: <<ICON_BUTTON>>px;
     max-width: <<ICON_BUTTON>>px;
     min-height: <<ICON_BUTTON>>px;
@@ -399,6 +407,15 @@ QPushButton#ShuffleButton, QPushButton#RepeatButton, QPushButton#ModeButton {
     max-width: <<ICON_BUTTON_BOX>>px;
     min-height: <<ICON_BUTTON_BOX>>px;
     max-height: <<ICON_BUTTON_BOX>>px;
+}
+/* A button whose whole face is an icon has no text to fill it, so the style
+   falls back to the palette's button brush and paints an opaque box where the
+   heart beside it shows the page through.  Naming the transparency here is what
+   keeps the two marks looking like two marks. */
+QPushButton#DislikeButton {
+    background: transparent;
+    border: none;
+    border-radius: <<RADIUS_ICON_BUTTON>>px;
 }
 QPushButton#TransportButton {
     background: transparent;
@@ -781,6 +798,7 @@ _DERIVED = frozenset(
         "PLAYING_BG",
         "ROW_HOVER",
         "LIKE_GLOW",
+        "DISLIKE_GLOW",
         "WAVE_BG",
         "WAVE_BORDER",
         "GROOVE",
@@ -857,6 +875,8 @@ class ThemeTokens(Mapping):
             return _alpha(colours["TEXT"], 0.04)
         if key == "LIKE_GLOW":
             return _alpha(colours["LIKE_ACTIVE"], 0.22)
+        if key == "DISLIKE_GLOW":
+            return _alpha(colours["DANGER"], 0.22)
         if key == "WAVE_BG":
             return _alpha(colours["WAVE_VIOLET"], 0.16)
         if key == "WAVE_BORDER":
@@ -1160,6 +1180,7 @@ __all__ = [
     "HANDLE",
     "HANDLE_HOVER",
     "ICON_BUTTON",
+    "DISLIKE_GLOW",
     "LIKE_ACTIVE",
     "LIKE_GLOW",
     "LIST_COVER_SIZE",

@@ -463,6 +463,9 @@ class Rig:
         controller.like_status_changed.connect(
             lambda track_id, liked: self.events.append(("like", track_id, liked))
         )
+        controller.dislike_status_changed.connect(
+            lambda track_id, disliked: self.events.append(("dislike", track_id, disliked))
+        )
         controller.fft_data_ready.connect(lambda block: self.events.append(("fft", block)))
         controller.waveform_data_ready.connect(lambda block: self.events.append(("wave", block)))
         controller.playback_error.connect(lambda text: self.events.append(("error", text)))
@@ -1111,9 +1114,21 @@ def test_marks_and_settings(app: QApplication) -> None:
         check("mark dislike", rig.controller.dislike())
         check("mark dislike settles", rig.settle())
         check("mark dislike sent", rig.client.dislike_calls == [("add", ("801:7",))])
+        check(
+            "mark dislike signal",
+            rig.events_of("dislike") == [("dislike", "801:7", True)],
+            rig.events_of("dislike"),
+        )
+        check(
+            "mark disliked metadata", rig.controller.current is not None and rig.controller.current.disliked
+        )
+        check("mark disliked payload", rig.controller.current.to_dict()["disliked"] is True)
         check("mark remove dislike", rig.controller.remove_dislike())
         check("mark remove dislike settles", rig.settle())
         check("mark remove dislike sent", ("remove", ("801:7",)) in rig.client.dislike_calls)
+        check(
+            "mark dislike cleared", rig.controller.current is not None and not rig.controller.current.disliked
+        )
         check("mark no error", not rig.events_of("mark_error"), rig.events_of("mark_error"))
 
         check("apply settings", rig.controller.apply_wave_settings(mood_energy="calm", diversity="discover"))

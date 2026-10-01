@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.config_manager import ConfigManager
-from core.playback_controller import PlaybackController, PlaybackState
+from core.playback_controller import PlaybackController, PlaybackState, QueueMode
 from ui.pages.collection_page import CollectionPage
 from ui.pages.search_page import SearchPage
 from ui.pages.settings_page import SettingsPage
@@ -77,7 +77,7 @@ from ui.widgets.icons import (
     speaker as speaker_icon,
 )
 from ui.widgets.icons import visualizer_icon
-from ui.widgets.like_button import LikeButton
+from ui.widgets.like_button import DislikeButton, LikeButton
 from ui.widgets.now_playing_drawer import NowPlayingDrawer
 from ui.widgets.track_list import format_duration
 from ui.widgets.visualizer import FULL_SCALE_VOLUME
@@ -486,6 +486,12 @@ class MainWindow(QMainWindow):
         self.like_button = LikeButton()
         self.like_button.clicked.connect(self._on_like)
         title_row.addWidget(self.like_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        # The two marks sit together on purpose: one button to say «more» and
+        # one to say «not again» are a decision, and a decision you cannot see
+        # both halves of is a decision you have to undo one guess at a time.
+        self.dislike_button = DislikeButton()
+        self.dislike_button.clicked.connect(self._on_dislike)
+        title_row.addWidget(self.dislike_button, 0, Qt.AlignmentFlag.AlignVCenter)
         titles.addLayout(title_row)
 
         meta_row = QHBoxLayout()
@@ -640,6 +646,7 @@ class MainWindow(QMainWindow):
         controller.state_changed.connect(lambda _state: self._refresh_state())
         controller.position_changed.connect(self._on_position)
         controller.like_status_changed.connect(lambda *_: self._refresh_like())
+        controller.dislike_status_changed.connect(lambda *_: self._refresh_like())
         controller.cover_ready.connect(self._on_cover)
         controller.fft_data_ready.connect(self._on_fft)
         controller.waveform_data_ready.connect(self._on_waveform)
@@ -649,6 +656,10 @@ class MainWindow(QMainWindow):
         controller.wave_error.connect(self._show_error)
         self.drawer.album_requested.connect(self._on_drawer_album)
         self.drawer.lyrics_requested.connect(self._on_drawer_lyrics)
+        # The drawer's marks are the same marks, so they are the same handlers:
+        # a click in either place has to reach the controller the same way.
+        self.drawer.like_button.clicked.connect(self._on_like)
+        self.drawer.dislike_button.clicked.connect(self._on_dislike)
         service = controller.service
         service.lyrics_ready.connect(self._on_lyrics_ready)
         service.lyrics_error.connect(self._on_lyrics_error)
@@ -863,6 +874,30 @@ class MainWindow(QMainWindow):
             self._controller.like()
         self._refresh_like()
 
+    def _on_dislike(self) -> None:
+        """Mark the track unwanted, and in radio get off it.
+
+        A dislike is a statement about the future, so in radio the track is
+        skipped as well: leaving it loaded means the next press of play is the
+        exact track the user just rejected.  A paused radio track is skipped
+        too, since «do not play me again» should not depend on the pause state.
+
+        In a manual queue the track is only marked.  The user picked that queue,
+        and silently jumping them somewhere else would throw away the order they
+        asked for on the strength of one click.
+        """
+        if self._controller.current is None:
+            return
+        if self._controller.current.disliked:
+            self._controller.remove_dislike()
+        else:
+            self._controller.dislike()
+        self._refresh_like()
+        if self._controller.mode == QueueMode.RADIO:
+            # Skipped after the mark is queued, not before: the service already
+            # knows this track is unwanted and can weigh that while it picks.
+            self._controller.next()
+
     def _on_mute(self) -> None:
         if self._controller.volume > 0:
             self._last_volume = self._controller.volume
@@ -996,9 +1031,24 @@ class MainWindow(QMainWindow):
                     marker(track_id)
 
     def _refresh_like(self) -> None:
+        """Sync both marks from the track, not from the last click.
+
+        The server is the authority on which of the two is set - it drops the
+        opposite mark on the same request - so reading the click back would let
+        the two buttons disagree whenever the network took a different view.
+        """
         track = self._controller.current
-        self.like_button.setChecked(bool(track and track.liked))
-        self.like_button.setEnabled(track is not None)
+        liked = bool(track and track.liked)
+        disliked = bool(track and track.disliked)
+        self.like_button.setChecked(liked)
+        self.dislike_button.setChecked(disliked)
+        enabled = track is not None
+        self.like_button.setEnabled(enabled)
+        self.dislike_button.setEnabled(enabled)
+        # Pushed rather than left to the drawer's own track slot: a mark change
+        # replaces the metadata in place and emits no track_changed, so the
+        # panel would keep showing whatever it was opened with.
+        self.drawer.set_marks(liked, disliked, enabled)
 
     def _refresh_state(self) -> None:
         state = self._controller.state

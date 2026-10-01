@@ -349,6 +349,79 @@ def heart(size: int = ICON_SIZE, colour: str | None = None, filled: bool = True)
     return _finish(pixmap, painter)
 
 
+def dislike_icon(size: int = ICON_SIZE, colour: str | None = None, active: bool = False) -> QIcon:
+    """A heart with a crack through it, for the dislike button.
+
+    The crack is the whole point, so it is cut out of the glyph rather than
+    painted over it: a stroke drawn across a filled heart would leave the heart
+    looking intact with a line on top, which is what a *broken icon* looks like,
+    and the button has to say «do not show me this again».  The hole is real -
+    the canvas is transparent and the break clears it - so the pill background
+    shows through the heart in both states, filled or outlined.
+
+    The outline is the same two-lobe path as :func:`heart`, so the pair lines up
+    pixel for pixel when they sit in one row.
+    """
+    colour = _tone("DANGER", colour)
+    pixmap, painter = _canvas(size)
+    box = size
+    path = QPainterPath()
+    path.moveTo(box * 0.5, box * 0.82)
+    path.cubicTo(
+        QPointF(box * 0.06, box * 0.5),
+        QPointF(box * 0.22, box * 0.14),
+        QPointF(box * 0.5, box * 0.34),
+    )
+    path.cubicTo(
+        QPointF(box * 0.78, box * 0.14),
+        QPointF(box * 0.94, box * 0.5),
+        QPointF(box * 0.5, box * 0.82),
+    )
+    painter.setPen(_pen(colour, STROKE))
+    painter.setBrush(QColor(colour) if active else Qt.BrushStyle.NoBrush)
+    painter.drawPath(path)
+
+    # The break: a thin band across the middle of the heart, cut out and then
+    # given two lips so the gap reads as torn rather than as a stray gap.
+    # Wider than a stroke plus two round caps, otherwise the lips drawn below
+    # close the gap back up and the heart looks whole again.
+    gap = STROKE * 1.6
+    top = QPointF(box * 0.42, box * 0.30)
+    bottom = QPointF(box * 0.58, box * 0.72)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(top.x() - gap, top.y()),
+                QPointF(top.x() + gap, top.y()),
+                QPointF(bottom.x() + gap, bottom.y()),
+                QPointF(bottom.x() - gap, bottom.y()),
+            ]
+        )
+    )
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+    # Redraw the heart's own contour so the crack does not eat into the lobes,
+    # but leave the band itself clear.
+    painter.save()
+    painter.setClipPath(path)
+    lips = _pen(colour, STROKE * 0.8)
+    # Flat caps: a round one at this width would reach across the open band.
+    lips.setCapStyle(Qt.PenCapStyle.FlatCap)
+    painter.setPen(lips)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawLine(
+        QPointF(top.x() - gap, top.y()),
+        QPointF(bottom.x() - gap, bottom.y()),
+    )
+    painter.drawLine(
+        QPointF(top.x() + gap, top.y()),
+        QPointF(bottom.x() + gap, bottom.y()),
+    )
+    painter.restore()
+    return _finish(pixmap, painter)
+
+
 # -- inline helpers ----------------------------------------------------------
 
 
@@ -415,6 +488,7 @@ __all__ = [
     "VISUALIZER_ICONS",
     "bars",
     "draw_equalizer",
+    "dislike_icon",
     "heart",
     "icon_size_for",
     "levels",

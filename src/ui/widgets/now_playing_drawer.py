@@ -36,6 +36,7 @@ from ui.theme import (
 )
 from ui.widgets.cover_frame import CoverFrame
 from ui.widgets.karaoke import GlowLabel, KaraokeView
+from ui.widgets.like_button import DislikeButton, LikeButton
 
 DRAWER_WIDTH = 320
 """The panel is fixed-width so opening it never reflows the page underneath."""
@@ -233,7 +234,28 @@ class NowPlayingDrawer(QFrame):
         self.lyrics_button.setEnabled(False)
         self.lyrics_button.clicked.connect(self._on_lyrics)
         layout.addWidget(self.lyrics_button, 1)
+
+        # The drawer is where the user looks while a track is sounding, so the
+        # marks belong here as well as in the bar. They are the same two buttons
+        # the bar has, wired by the window to the same handlers - one mark, two
+        # places, rather than a drawer copy that can fall behind.
+        self.like_button = LikeButton()
+        layout.addWidget(self.like_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.dislike_button = DislikeButton()
+        layout.addWidget(self.dislike_button, 0, Qt.AlignmentFlag.AlignVCenter)
         return row
+
+    def set_marks(self, liked: bool, disliked: bool, enabled: bool = True) -> None:
+        """Show which mark the current track carries.
+
+        The drawer keeps no state: the window reads the track and pushes it in,
+        so the bar and this panel cannot end up showing different things for
+        the same track after a change made in either one.
+        """
+        self.like_button.setChecked(bool(liked))
+        self.dislike_button.setChecked(bool(disliked))
+        self.like_button.setEnabled(enabled)
+        self.dislike_button.setEnabled(enabled)
 
     def _build_lyrics(self) -> QWidget:
         """The lyric panel: a karaoke column when the text has timings."""
@@ -270,6 +292,7 @@ class NowPlayingDrawer(QFrame):
             self.bitrate_label.setText("—")
             self.album_button.setEnabled(False)
             self.lyrics_button.setEnabled(False)
+            self.set_marks(False, False, enabled=False)
             self.cover.set_pixmap(None)
             self._hide_lyrics()
             return
@@ -288,6 +311,7 @@ class NowPlayingDrawer(QFrame):
         self.volume_label.setText(f"{self._controller.volume}%")
         self.album_button.setEnabled(bool(meta.album))
         self.lyrics_button.setEnabled(bool(meta.has_lyrics))
+        self.set_marks(bool(meta.liked), bool(meta.disliked))
         # A new track invalidates any text still on screen from the last one.
         if self._lyrics_track_id and self._lyrics_track_id != meta.id:
             self._hide_lyrics()

@@ -157,6 +157,15 @@ class TrackMetadata:
     cover_path: str | None = None
     cover_url: str | None = None
     liked: bool = False
+    disliked: bool = False
+    """Whether the user asked not to be offered this track again.
+
+    Carried alongside ``liked`` rather than derived from it: the two are set
+    independently by the server, and a UI that had only one of them would have
+    to guess, which is how «I liked this but do not play it again» turns into a
+    surprise two clicks later.
+    """
+
     available: bool = True
     explicit: bool = False
     source: str = ""
@@ -187,6 +196,7 @@ class TrackMetadata:
             "cover_path": self.cover_path,
             "cover_url": self.cover_url,
             "liked": self.liked,
+            "disliked": self.disliked,
             "available": self.available,
             "explicit": self.explicit,
             "source": self.source,
@@ -262,6 +272,13 @@ class PlaybackController(QObject):
     volume_changed = Signal(int)
     wave_settings_changed = Signal(dict)
     like_status_changed = Signal(str, bool)
+    dislike_status_changed = Signal(str, bool)
+    """``(track_id, disliked)``.
+
+    Separate from :attr:`like_status_changed` because a dislike has a side
+    effect on radio playback, and a listener that could not tell the two apart
+    would skip a track the user had just liked.
+    """
     fft_data_ready = Signal(object)
     waveform_data_ready = Signal(object)
 
@@ -341,6 +358,7 @@ class PlaybackController(QObject):
         self._connect(service.stream_error, self._on_stream_error)
         self._connect(service.like_changed, self._on_like_changed)
         self._connect(service.like_error, self.mark_error.emit)
+        self._connect(service.dislike_changed, self._on_dislike_changed)
         self._connect(service.dislike_error, self.mark_error.emit)
         self._connect(service.settings_applied, self._on_settings_applied)
         self._connect(service.queue_changed, self.queue_changed.emit)
@@ -699,8 +717,19 @@ class PlaybackController(QObject):
 
     def _on_like_changed(self, track_id: str, liked: bool) -> None:
         if self._current is not None and self._current.id == track_id:
-            self._current = replace(self._current, liked=bool(liked))
+            # The server drops the opposite mark with the same request, so a
+            # like is always the end of a dislike for this track.
+            self._current = replace(
+                self._current, liked=bool(liked), disliked=False if liked else self._current.disliked
+            )
         self.like_status_changed.emit(track_id, bool(liked))
+
+    def _on_dislike_changed(self, track_id: str, disliked: bool) -> None:
+        if self._current is not None and self._current.id == track_id:
+            self._current = replace(
+                self._current, disliked=bool(disliked), liked=False if disliked else self._current.liked
+            )
+        self.dislike_status_changed.emit(track_id, bool(disliked))
 
     # -- loading ------------------------------------------------------------
 
@@ -754,6 +783,7 @@ class PlaybackController(QObject):
 
     def _metadata(self, track: WaveTrack, link: StreamLink | None = None) -> TrackMetadata:
         liked = bool(track.liked) or self._service.is_liked(track)
+        disliked = self._service.is_disliked(track)
         index = self._manual_index if self._mode == QueueMode.MANUAL else -1
         return TrackMetadata(
             id=track.track_id,
@@ -764,6 +794,7 @@ class PlaybackController(QObject):
             cover_path=self._cover_paths.get(track.track_id),
             cover_url=track_cover_url(track, self._cover_size),
             liked=liked,
+            disliked=disliked,
             available=bool(track.available),
             explicit=bool(track.explicit),
             source=track.source,

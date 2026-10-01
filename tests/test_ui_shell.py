@@ -66,6 +66,7 @@ from ui.theme import (  # noqa: E402
     BADGE_HEIGHT,
     COVER_SIZE,
     DARK_QSS,
+    ICON_BUTTON,
     PANEL_RADIUS,
     SEGMENT_HEIGHT,
     apply_theme,
@@ -718,7 +719,10 @@ def test_collection_page_shows_that_it_is_waiting(app) -> None:
         rig.client.liked_gate = None
         rig.client.liked_error = RuntimeError("Нет сети")
         page.refresh()
-        app.processEvents()
+        # ``refresh`` records the request before it returns, so the busy state
+        # is already true here.  This one is not behind the gate and fails at
+        # once, so pumping events first used to deliver the answer and clear the
+        # spinner before the assertion - the test was racing the worker thread.
         check("a refresh spins again", page.is_loading and page.spinner.isVisible())
         rig.settle()
         check("a refused request leaves the spinner down", not page.spinner.isVisible())
@@ -728,7 +732,6 @@ def test_collection_page_shows_that_it_is_waiting(app) -> None:
         gate = threading.Event()
         rig.client.liked_gate = gate
         page.refresh()
-        app.processEvents()
         page.set_animations_enabled(False)
         check("with animations off it is still visible", page.spinner.isVisible())
         check("but no longer turning", not page.spinner.is_spinning())
@@ -1246,10 +1249,16 @@ def test_settings_page_never_squeezes_its_labels(app, config: ConfigManager) -> 
             holder.height() >= holder.layout().sizeHint().height(),
             f"{holder.height()} < {holder.layout().sizeHint().height()}",
         )
+        # ``sizeHint`` is the wrong question for a word-wrapped label: Qt sizes
+        # it as if the text had to break, so it reports two lines for a string
+        # that comfortably fits on one and would fail a correct layout.  What
+        # a wrapped label actually needs is the height for the width it has.
         clipped = [
             label.text()
             for label in page.findChildren(QLabel)
-            if label.text() and label.isVisible() and label.height() < label.sizeHint().height() - 1
+            if label.text()
+            and label.isVisible()
+            and label.height() + 1 < label.heightForWidth(max(1, label.width()))
         ]
         check(f"{width}x{height}: no label is cut off", clipped == [], str(clipped))
         check(f"{width}x{height}: the page scrolls rather than squashing", scroll.widget().height() >= height)
@@ -1898,6 +1907,256 @@ def test_main_window_player_bar_follows_controller(app, config: ConfigManager) -
         window.close()
     finally:
         rig.close()
+
+
+def test_dislike_button_skips_the_track_in_radio(app, config: ConfigManager) -> None:
+    """A dislike is a statement about the future, so radio acts on it."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        rig.client.batches = [make_batch_stub([1, 2]), make_batch_stub([3, 4])]
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        window.wave_page.start_wave()
+        rig.settle()
+        check("we are in radio", rig.controller.mode == QueueMode.RADIO)
+        first = rig.controller.current
+        check("a track is loaded", first is not None)
+        track_id = first.id
+
+        check("the button is there", window.dislike_button.objectName() == "DislikeButton")
+        check("it starts unmarked", window.dislike_button.isChecked() is False)
+        check("and the like button is beside it", window.like_button.objectName() == "LikeButton")
+        check(
+            "both live in the same title row",
+            window.like_button.parentWidget() is window.dislike_button.parentWidget(),
+        )
+
+        window.dislike_button.click()
+        rig.settle()
+        check(
+            "the dislike was sent",
+            rig.client.dislike_calls == [("add", (str(track_id),))],
+            rig.client.dislike_calls,
+        )
+        check(
+            "the signal fired",
+            rig.events_of("dislike") == [("dislike", track_id, True)],
+            rig.events_of("dislike"),
+        )
+        check("radio moved on", rig.controller.current is not None and rig.controller.current.id != track_id)
+        check("and the button followed the new track", window.dislike_button.isChecked() is False)
+    finally:
+        window.close()
+        rig.close()
+
+
+def test_dislike_only_marks_the_track_in_a_manual_queue(app, config: ConfigManager) -> None:
+    """A hand-built queue is the user's order; one click must not discard it."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        rig.client.batches = [make_batch_stub([1, 2]), make_batch_stub([3, 4])]
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        window.wave_page.start_wave()
+        rig.settle()
+        check("radio to begin with", rig.controller.mode == QueueMode.RADIO)
+        # A hand-built queue is the only way into manual mode, which is the point
+        # of the test: this is the case where skipping would be rude.
+        check("switch to a playlist", rig.controller.play_playlist([make_track(901), make_track(902)]))
+        rig.settle()
+        check("now manual", rig.controller.mode == QueueMode.MANUAL)
+        first = rig.controller.current
+        track_id = first.id if first else None
+
+        window.dislike_button.click()
+        rig.settle()
+        check(
+            "the dislike was sent",
+            rig.client.dislike_calls == [("add", (str(track_id),))],
+            rig.client.dislike_calls,
+        )
+        check(
+            "but the track stayed",
+            rig.controller.current is not None and rig.controller.current.id == track_id,
+        )
+        check("and it is marked", bool(rig.controller.current and rig.controller.current.disliked))
+        check("the button shows it", window.dislike_button.isChecked() is True)
+    finally:
+        window.close()
+        rig.close()
+
+
+def test_like_and_dislike_are_one_pair_of_truths(app, config: ConfigManager) -> None:
+    """Two buttons, one opinion: the server decides which mark is set."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        # A manual queue, so the mark stays on screen to be inspected: in radio
+        # the click also skips, and the new track carries no mark.
+        check("load a playlist", rig.controller.play_playlist([make_track(801), make_track(802)]))
+        rig.settle()
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        check("manual, so nothing is skipped", rig.controller.mode == QueueMode.MANUAL)
+        track_id = rig.controller.current.id
+        check(
+            "neither mark is set",
+            window.like_button.isChecked() is False and window.dislike_button.isChecked() is False,
+        )
+
+        # Disliking, then liking, must not leave both lit: the server drops the
+        # opposite mark with the same request.
+        window.dislike_button.click()
+        rig.settle()
+        check(
+            "disliked", window.dislike_button.isChecked() is True and window.like_button.isChecked() is False
+        )
+        window.like_button.click()
+        rig.settle()
+        check(
+            "liked instead",
+            window.like_button.isChecked() is True and window.dislike_button.isChecked() is False,
+        )
+        check(
+            "the metadata agrees",
+            rig.controller.current.liked is True and rig.controller.current.disliked is False,
+        )
+        check(
+            "both signals fired once", len(rig.events_of("dislike")) == 1 and len(rig.events_of("like")) == 1
+        )
+
+        # Clicking the lit mark again takes it back, the same as the heart.
+        window.like_button.click()
+        rig.settle()
+        check("and unliked", window.like_button.isChecked() is False)
+        check("the request was a removal", ("remove", (str(track_id),)) in rig.client.like_calls)
+        check("nothing is marked", not rig.controller.current.liked and not rig.controller.current.disliked)
+    finally:
+        window.close()
+        rig.close()
+
+
+def test_dislike_button_does_nothing_without_a_track(app, config: ConfigManager) -> None:
+    """No track, no opinion - and the button says so by being disabled."""
+    rig = Rig(app)
+    try:
+        rig.login()
+        window = MainWindow(rig.controller, config)
+        window.show()
+        app.processEvents()
+        check("idle: the dislike is off", window.dislike_button.isChecked() is False)
+        check("idle: and disabled", window.dislike_button.isEnabled() is False)
+        check("idle: as is the like", window.like_button.isEnabled() is False)
+        window.dislike_button.click()
+        app.processEvents()
+        check(
+            "a click on a disabled button does nothing",
+            rig.client.dislike_calls == [],
+            rig.client.dislike_calls,
+        )
+    finally:
+        window.close()
+        rig.close()
+
+
+def test_dislike_icon_is_a_broken_heart(app) -> None:
+    """The mark has to read as a break, not as a line drawn over a heart."""
+    from ui.widgets.icons import dislike_icon
+
+    for size in (16, 20, 24, 32):
+        for active in (False, True):
+            pixmap = dislike_icon(size, active=active).pixmap(size, size)
+            check(f"{size}px active={active}: something is drawn", not pixmap.isNull())
+            image = pixmap.toImage()
+            rows = {y: [x for x in range(size) if image.pixelColor(x, y).alpha() > 0] for y in range(size)}
+            drawn = {y: xs for y, xs in rows.items() if xs}
+            check(f"{size}px active={active}: there is ink", bool(drawn))
+            # A crack is a hole *inside* the mark, so the question has to be
+            # asked per row and strictly between the row's own ends -
+            # transparent pixels in the corners are just the canvas, and a
+            # global bounding box would put the sample on the outline.
+            top, bottom = min(drawn), max(drawn)
+            broken = [
+                y
+                for y in range(top, bottom + 1)
+                if drawn[y]
+                and any(image.pixelColor(x, y).alpha() == 0 for x in range(drawn[y][0], drawn[y][-1] + 1))
+            ]
+            check(
+                f"{size}px active={active}: rows are broken by the crack",
+                len(broken) >= 2,
+                f"only rows {broken} of {top}-{bottom} are broken",
+            )
+    check(
+        "the two states differ",
+        not dislike_icon(20).pixmap(20, 20).toImage()
+        == dislike_icon(20, active=True).pixmap(20, 20).toImage(),
+    )
+
+
+def test_dislike_button_matches_the_like_button(app) -> None:
+    """Two hearts in one row have to be the same size or the row looks broken.
+
+    The sheet's own size rules beat ``setFixedSize``, so this has to be measured
+    against the real theme: without ``DislikeButton`` in the square-icon
+    selector the button quietly takes the 46px height of a text button.
+    """
+    from ui.widgets.like_button import DislikeButton, LikeButton
+
+    apply_theme(app)
+    like = LikeButton()
+    dislike = DislikeButton()
+    try:
+        check("same square", like.size() == dislike.size(), f"{like.size()} vs {dislike.size()}")
+        check(
+            "and the same square the sheet asks for",
+            dislike.size().height() == ICON_BUTTON,
+            f"{dislike.size().height()} vs {ICON_BUTTON}",
+        )
+        check("no text button height leaked in", dislike.size().height() == like.size().height())
+        check("the dislike is checkable", dislike.isCheckable())
+        check("it explains itself", "Не нравится" in dislike.toolTip(), dislike.toolTip())
+        check("the mark is drawn, not typed", dislike.icon().isNull() is False)
+
+        # A button whose whole face is an icon gets the palette's opaque button
+        # brush unless the sheet says otherwise, which would put a filled box in
+        # the transport row beside the see-through heart.
+        def face(btn):
+            image = btn.grab().toImage()
+            corners = [image.pixelColor(x, y).alpha() for x, y in ((0, 0), (35, 0), (0, 35), (35, 35))]
+            ink = sum(
+                1
+                for x in range(image.width())
+                for y in range(image.height())
+                if image.pixelColor(x, y).alpha() > 0
+            )
+            return corners, ink
+
+        like_corners, like_ink = face(like)
+        dislike_corners, dislike_ink = face(dislike)
+        check("the heart shows the page through", like_corners == [0, 0, 0, 0], str(like_corners))
+        check("and so does the broken heart", dislike_corners == like_corners, str(dislike_corners))
+        # Both are marks rather than blanks, and they are not the same mark.
+        check("both are drawn", like_ink > 40 and dislike_ink > 40, f"{like_ink} and {dislike_ink}")
+        check("and they are not the same glyph", like_ink != dislike_ink, f"{like_ink} and {dislike_ink}")
+
+        dislike.setChecked(True)
+        for _ in range(30):
+            app.processEvents()
+        check("and it eases like the heart does", isinstance(dislike.mix, float))
+        check(
+            "the wash fills the square, not the corners",
+            face(dislike)[0] == [0, 0, 0, 0],
+            str(face(dislike)[0]),
+        )
+    finally:
+        like.deleteLater()
+        dislike.deleteLater()
 
 
 def test_main_window_visualizer_cycle_and_persistence(app, config: ConfigManager) -> None:
