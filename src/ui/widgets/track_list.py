@@ -637,6 +637,18 @@ class TrackList(QListWidget):
         if 0 <= int(index) < len(self._tracks):
             self.track_activated.emit(self._tracks[int(index)])
 
+    def contextMenuEvent(self, event) -> None:
+        item = self.itemAt(event.pos())
+        if item is None:
+            return
+        row = self.row(item)
+        trk = self._tracks[row] if 0 <= row < len(self._tracks) else None
+        from ui.widgets.track_context_menu import TrackContextMenu
+
+        menu = TrackContextMenu(self._controller, self)
+        menu.set_track(trk)
+        menu.exec(event.globalPos())
+
 
 __all__ = [
     "ALBUM_BREAKPOINT",

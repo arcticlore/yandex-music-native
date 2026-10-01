@@ -1117,6 +1117,10 @@ class YandexService(QObject):
     preferences_changed = Signal(object)
     search_ready = Signal(object)
     search_failed = Signal(str)
+    album_ready = Signal(dict)
+    album_failed = Signal(str)
+    artist_ready = Signal(dict)
+    artist_failed = Signal(str)
     collection_ready = Signal(str, object)
     collection_failed = Signal(str)
     stream_ready = Signal(object)
@@ -1608,6 +1612,69 @@ class YandexService(QObject):
             self.collection_failed.emit(readable_error(exc))
 
         return self._submit(_Job("load_liked", call, ok, err))
+
+    def load_album(self, album_id: int | str, with_tracks: bool = True) -> bool:
+        """Fetch album info and tracks in background."""
+        self.start()
+        aid = _text(album_id)
+
+        def call(client: Any) -> Any:
+            return client.albums_with_tracks(aid) if with_tracks else client.albums(aid)
+
+        def ok(result: Any) -> None:
+            try:
+                data = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+            except Exception:
+                data = {}
+            self.album_ready.emit(data)
+
+        def err(exc: Exception) -> None:
+            self.album_failed.emit(readable_error(exc))
+
+        return self._submit(_Job("album", call, ok, err))
+
+    def load_artist(self, artist_id: int | str) -> bool:
+        """Fetch artist info, popular tracks and albums in background."""
+        self.start()
+        aid = _text(artist_id)
+
+        def call(client: Any) -> Any:
+            artist = client.artists(aid)
+            if artist and hasattr(artist, "__iter__") and not isinstance(artist, (str, bytes)):
+                artist_obj = artist[0] if len(artist) > 0 else None
+            else:
+                artist_obj = artist
+            albums = client.artists_direct_albums(aid)
+            # popular tracks often on artist.popular.tracks
+            popular = []
+            if artist_obj is not None:
+                try:
+                    pop = getattr(artist_obj, "popular", None)
+                    if pop is not None:
+                        popular = getattr(pop, "tracks", []) or []
+                except Exception:
+                    popular = []
+            return {"artist": artist_obj, "albums": albums, "popular_tracks": popular}
+
+        def ok(result: Any) -> None:
+            try:
+                out = {
+                    "artist": result["artist"].to_dict()
+                    if hasattr(result["artist"], "to_dict")
+                    else (result["artist"] or {}),
+                    "albums": [a.to_dict() if hasattr(a, "to_dict") else a for a in (result["albums"] or [])],
+                    "popular_tracks": [
+                        t.to_dict() if hasattr(t, "to_dict") else t for t in (result["popular_tracks"] or [])
+                    ],
+                }
+            except Exception:
+                out = {}
+            self.artist_ready.emit(out)
+
+        def err(exc: Exception) -> None:
+            self.artist_failed.emit(readable_error(exc))
+
+        return self._submit(_Job("artist", call, ok, err))
 
     # -- queue -------------------------------------------------------------
 
