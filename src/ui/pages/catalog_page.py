@@ -66,7 +66,7 @@ class AlbumView(QWidget):
         head.addLayout(info, 1)
         root.addLayout(head)
 
-        self.tracks = TrackList(self._controller)
+        self.tracks = TrackList(self)
         root.addWidget(self.tracks, 1)
 
     def set_album(self, data: dict[str, Any]) -> None:
@@ -141,7 +141,7 @@ class ArtistView(QWidget):
 
         self.pop_lbl = QLabel("Популярные треки")
         root.addWidget(self.pop_lbl)
-        self.pop_list = TrackList(self._controller)
+        self.pop_list = TrackList(self)
         root.addWidget(self.pop_list)
 
         self.alb_lbl = QLabel("Альбомы")

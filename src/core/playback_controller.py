@@ -691,16 +691,24 @@ class PlaybackController(QObject):
 
     # -- marks --------------------------------------------------------------
 
-    def like(self) -> bool:
+    def like(self, track: Any = None) -> bool:
+        if track is not None:
+            return self._set_mark(track, add=True, dislike=False)
         return self._mark_current(add=True, dislike=False)
 
-    def remove_like(self) -> bool:
+    def remove_like(self, track: Any = None) -> bool:
+        if track is not None:
+            return self._set_mark(track, add=False, dislike=False)
         return self._mark_current(add=False, dislike=False)
 
-    def dislike(self) -> bool:
+    def dislike(self, track: Any = None) -> bool:
+        if track is not None:
+            return self._set_mark(track, add=True, dislike=True)
         return self._mark_current(add=True, dislike=True)
 
-    def remove_dislike(self) -> bool:
+    def remove_dislike(self, track: Any = None) -> bool:
+        if track is not None:
+            return self._set_mark(track, add=False, dislike=True)
         return self._mark_current(add=False, dislike=True)
 
     def _mark_current(self, add: bool, dislike: bool) -> bool:
