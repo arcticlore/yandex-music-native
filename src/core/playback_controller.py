@@ -460,6 +460,33 @@ class PlaybackController(QObject):
     def is_buffering(self) -> bool:
         return self._state == PlaybackState.BUFFERING
 
+    def enqueue(self, track: Any) -> bool:
+        target = self._resolve_track(track)
+        if target is None:
+            return False
+        if self._mode != QueueMode.MANUAL:
+            self._manual_queue = list(self._queue)
+            self._manual_index = self._index
+            self._mode = QueueMode.MANUAL
+        self._manual_queue.append(target)
+        self._emit_queue()
+        return True
+
+    def enqueue_next(self, track: Any) -> bool:
+        target = self._resolve_track(track)
+        if target is None:
+            return False
+        if self._mode != QueueMode.MANUAL:
+            self._manual_queue = list(self._queue)
+            self._manual_index = self._index
+            self._mode = QueueMode.MANUAL
+        idx = self._manual_index + 1 if self._manual_index >= 0 else len(self._manual_queue)
+        if idx < 0 or idx > len(self._manual_queue):
+            idx = len(self._manual_queue)
+        self._manual_queue.insert(idx, target)
+        self._emit_queue()
+        return True
+
     @property
     def settings(self) -> dict[str, str]:
         mood_energy, diversity, language = self._service.settings()

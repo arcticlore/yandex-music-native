@@ -109,13 +109,35 @@ class NotificationService(QObject):
             "Notify",
         )
         message << self._app_name
-        message << 0
+        from PySide6.QtDBus import QDBusArgument
+
+        class UInt32(QDBusArgument):
+            def __init__(self, v: int = 0) -> None:
+                super().__init__()
+                self._v = int(v)
+
+            def marshal(self, arg):
+                from PySide6.QtCore import QDataStream
+
+                ds = QDataStream(arg)
+                ds.setByteOrder(QDataStream.ByteOrder.LittleEndian)
+                ds.writeUInt32(self._v)
+
+            def demarshal(self, arg):
+                from PySide6.QtCore import QDataStream
+
+                ds = QDataStream(arg)
+                ds.setByteOrder(QDataStream.ByteOrder.LittleEndian)
+                self._v = ds.readUInt32()
+                return self._v
+
+        message << UInt32(0)
         message << APP_ICON
         message << track.title
         message << track.artists_name or track.album
         message << []
         message << notification_hints(track)
-        message << self._timeout_ms
+        message << int(self._timeout_ms)
         reply = self._bus.call(message)
         if reply.type() == QDBusMessage.MessageType.ErrorMessage:
             log.debug("notify failed: %s", reply.errorMessage())

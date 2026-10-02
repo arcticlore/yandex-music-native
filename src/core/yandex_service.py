@@ -1598,10 +1598,21 @@ class YandexService(QObject):
         method = f"users_likes_{key}"
 
         def call(client: Any) -> Any:
-            result = getattr(client, method)(uid)
+            cuid = uid
+            if not cuid:
+                try:
+                    if hasattr(client, "me") and getattr(client, "me"):
+                        cuid = getattr(getattr(client.me, "account", object()), "uid", None)
+                except Exception:
+                    cuid = None
+            try:
+                if cuid is not None:
+                    result = getattr(client, method)(cuid)
+                else:
+                    result = getattr(client, method)()
+            except TypeError:
+                result = getattr(client, method)(cuid) if cuid else getattr(client, method)()
             if key == "tracks":
-                # The like list only carries references; one extra call gives
-                # the rows a title, an album, a cover and a duration.
                 return hydrate_liked_tracks(client, result)
             return result
 
@@ -1957,7 +1968,15 @@ class YandexService(QObject):
         tag = f"{'dislike' if dislike else 'like'}:{action}"
 
         def call(client: Any) -> Any:
-            return getattr(client, name)(ids)
+            try:
+                return getattr(client, name)(ids)
+            except Exception:
+                try:
+                    if hasattr(client, "init"):
+                        client.init()
+                    return getattr(client, name)(ids)
+                except Exception:
+                    raise
 
         def ok(_result: Any) -> None:
             with self._lock:
