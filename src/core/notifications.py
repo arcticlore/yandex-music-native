@@ -109,29 +109,7 @@ class NotificationService(QObject):
             "Notify",
         )
         message << self._app_name
-        from PySide6.QtDBus import QDBusArgument
-
-        class UInt32(QDBusArgument):
-            def __init__(self, v: int = 0) -> None:
-                super().__init__()
-                self._v = int(v)
-
-            def marshal(self, arg):
-                from PySide6.QtCore import QDataStream
-
-                ds = QDataStream(arg)
-                ds.setByteOrder(QDataStream.ByteOrder.LittleEndian)
-                ds.writeUInt32(self._v)
-
-            def demarshal(self, arg):
-                from PySide6.QtCore import QDataStream
-
-                ds = QDataStream(arg)
-                ds.setByteOrder(QDataStream.ByteOrder.LittleEndian)
-                self._v = ds.readUInt32()
-                return self._v
-
-        message << UInt32(0)
+        message << 0
         message << APP_ICON
         message << track.title
         message << track.artists_name or track.album
