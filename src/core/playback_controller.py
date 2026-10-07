@@ -738,6 +738,19 @@ class PlaybackController(QObject):
             return self._set_mark(track, add=False, dislike=True)
         return self._mark_current(add=False, dislike=True)
 
+    def _set_mark(self, track: Any, add: bool, dislike: bool) -> bool:
+        target = self._coerce_track(track)
+        if target is None:
+            self.mark_error.emit("", "Трек не выбран")
+            return False
+        if dislike:
+            if add:
+                return self._service.dislike(target)
+            return self._service.remove_dislike(target)
+        if add:
+            return self._service.like(target)
+        return self._service.remove_like(target)
+
     def _mark_current(self, add: bool, dislike: bool) -> bool:
         if self._current_wave is None:
             self.mark_error.emit("", "Трек не выбран")
