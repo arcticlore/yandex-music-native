@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+
 from core.yandex_service import YandexService
 from test_playback_controller import Rig
-
-
 def test_load_album_emits_ready(app):
     rig = Rig(app)
     try:
@@ -16,8 +22,6 @@ def test_load_album_emits_ready(app):
         assert ev and ev[0]
     finally:
         rig.close()
-
-
 def test_load_artist_emits_ready(app):
     rig = Rig(app)
     try:
