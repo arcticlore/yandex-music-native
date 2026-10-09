@@ -10,6 +10,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from core.yandex_service import YandexService
 from test_playback_controller import Rig
+
+
 def test_load_album_emits_ready(app):
     rig = Rig(app)
     try:
@@ -22,6 +24,8 @@ def test_load_album_emits_ready(app):
         assert ev and ev[0]
     finally:
         rig.close()
+
+
 def test_load_artist_emits_ready(app):
     rig = Rig(app)
     try:

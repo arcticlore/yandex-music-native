@@ -9,6 +9,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 
 from core.audio_cache import AudioCache
+
+
 def test_lru_cleanup(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     c = AudioCache(max_mb=1)

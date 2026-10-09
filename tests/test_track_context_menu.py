@@ -10,6 +10,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from ui.widgets.track_context_menu import TrackContextMenu
 from test_playback_controller import Rig, make_track
+
+
 def test_context_menu_has_actions(app):
     rig = Rig(app)
     try:
