@@ -39,7 +39,7 @@ DEFAULT_THEME = "obsidian"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "volume": 80,
-    "visualizer": "spectrum",
+    "visualizer": "wave",
     "quality": "auto",
     "last_station": "user:onyourwave",
     "cache_tracks": True,

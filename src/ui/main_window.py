@@ -84,7 +84,7 @@ from ui.widgets.visualizer import FULL_SCALE_VOLUME
 
 log = logging.getLogger(__name__)
 
-APP_NAME = "Яндекс Музыка"
+APP_NAME = "Волна"
 PAGES = (
     ("wave", "Моя волна"),
     ("collection", "Коллекция"),

@@ -1087,9 +1087,9 @@ def test_settings_page_persists_choices(app, config: ConfigManager) -> None:
     seen: list[str] = []
     page.visualizer_changed.connect(seen.append)
     check("loads visualizer", page.visualizer_group.value == config.get_visualizer())
-    check("switch off", page.visualizer_group.set_value("wave") is True)
-    check("config updated", config.get_visualizer() == "wave")
-    check("signal emitted", seen == ["wave"])
+    check("switch off", page.visualizer_group.set_value("spectrum") is True)
+    check("config updated", config.get_visualizer() == "spectrum")
+    check("signal emitted", seen == ["spectrum"])
     page.quality_group.set_value("lossless")
     check("quality saved", config.get_quality() == "lossless")
     page.theme_group.set_value("cyberpunk")
@@ -1103,7 +1103,7 @@ def test_settings_page_persists_choices(app, config: ConfigManager) -> None:
     page.tray_group.set_value("never")
     check("tray saved", config.get("tray") == "never")
     page.reset()
-    check("reset visualizer", config.get_visualizer() == "spectrum")
+    check("reset visualizer", config.get_visualizer() == "wave")
     check("reset notifications", config.get_notifications() is True)
     page.deleteLater()
 
