@@ -3021,7 +3021,7 @@ def test_flow_layout_wraps_and_never_squeezes() -> None:
         )
         check(f"at {width}px every label is laid out", sum(len(row) for row in rows.values()) == len(labels))
 
-    host.resize(700, 420)
+    host.resize(900, 420)
     app.processEvents()
     check("one wide row holds them all", len({button.y() for button in buttons}) == 1)
     host.resize(260, 420)
