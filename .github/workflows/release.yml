@@ -42,7 +42,7 @@ jobs:
       - name: Byte-compile
         run: python -m compileall -q src tests
       - name: Pytest
-        run: python -m pytest -q
+        run: python -m pytest -ra -v --tb=short
       - name: MPRIS self-test (private session bus)
         run: dbus-run-session -- python tests/mpris_selftest.py
 
